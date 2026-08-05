@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: crawler_postgres
+    environment:
+      POSTGRES_USER: crawler_user
+      POSTGRES_PASSWORD: crawler_password
+      POSTGRES_DB: crawler_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  neo4j:
+    image: neo4j:5.20-community
+    container_name: crawler_neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/crawler_neo4j_password
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4jdata:/data
+      - neo4jlogs:/logs
+
+  crawler-app:
+    build: .
+    container_name: crawler_app
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=crawler_neo4j_password
+    depends_on:
+      - postgres
+      - neo4j
+
+volumes:
+  pgdata:
+  neo4jdata:
+  neo4jlogs:
