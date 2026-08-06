@@ -4,8 +4,12 @@ export interface Page {
   url: string;
   title: string;
   parentPageId?: string | null;
+  viaLabel?: string | null;
+  viaSelector?: string | null;
   breadcrumb?: string | null;
   domHash?: string;
+  aiSummary?: string | null;
+  aiDescription?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -29,4 +33,5 @@ export interface UiElement {
   role?: string;
   confidence: number;
   metadata?: any; // Extra details like fields, columns, action buttons, etc.
+  aiDescription?: string | null;
 }

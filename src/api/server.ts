@@ -1,24 +1,35 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import swaggerUi from 'swagger-ui-express';
 import { router } from './routes';
 import { closeNeo4jDriver } from '../config/neo4j';
+import openapiSpec from './openapi.json';
 
 const app = express();
 const port = process.env.PORT || 3000;
+const RECORDINGS_DIR = process.env.RECORDINGS_DIR || path.join(__dirname, '..', '..', 'recordings');
 
 app.use(cors());
 app.use(express.json());
+
+// Workflow recording videos/captions written by workflow-agent-worker onto the shared volume.
+app.use('/recordings', express.static(RECORDINGS_DIR));
 
 // Main entry route
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
+// API documentation
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openapiSpec));
+
 // Mount modular routes
 app.use('/api', router);
 
 const server = app.listen(port, () => {
   console.log(`Website Discovery & Knowledge Graph Service running on http://localhost:${port}`);
+  console.log(`API docs (Swagger UI) available at http://localhost:${port}/api-docs`);
 });
 
 // Graceful Shutdown

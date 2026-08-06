@@ -179,6 +179,49 @@ app.get('/settings', (req, res) => {
   ));
 });
 
+// --- Login-gated area, for exercising the crawler's login-wall handling ---
+const isLoggedIn = (req: express.Request): boolean => (req.headers.cookie || '').includes('session=valid');
+
+app.get('/portal', (req, res) => {
+  if (!isLoggedIn(req)) {
+    return res.redirect('/login');
+  }
+  res.send(layout(
+    'Secure Portal',
+    `<h1>Secure Portal</h1><p>Welcome back, authenticated user.</p>`,
+    'Portal'
+  ));
+});
+
+app.get('/login', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head><meta charset="UTF-8"><title>Login</title></head>
+    <body>
+      <h2>Sign In</h2>
+      <form action="/login" method="POST">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required>
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required>
+        <button type="submit">Sign In</button>
+      </form>
+    </body>
+    </html>
+  `);
+});
+
+app.use(express.urlencoded({ extended: true }));
+app.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  if (username === 'admin' && password === 'admin123') {
+    res.setHeader('Set-Cookie', 'session=valid; Path=/');
+    return res.redirect('/portal');
+  }
+  res.status(401).send('Invalid credentials. <a href="/login">Try again</a>');
+});
+
 export const mockServer = app.listen(PORT, () => {
   console.log(`Mock CRM Target App running on http://localhost:${PORT}`);
 });

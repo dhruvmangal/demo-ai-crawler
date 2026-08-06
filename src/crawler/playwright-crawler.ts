@@ -5,6 +5,11 @@ import { UiDiscovery } from '../discovery/ui-discovery';
 import { SafetyEngine } from '../safety/safety-engine';
 import { UiElement } from '../types/pages';
 
+export interface CrawlCredentials {
+  username: string;
+  password: string;
+}
+
 export interface CrawlOptions {
   projectId: string;
   startUrl: string;
@@ -12,11 +17,45 @@ export interface CrawlOptions {
   cookies?: any[];
   storageStatePath?: string;
   connectCdpUrl?: string;
+  credentials?: CrawlCredentials;
 }
+
+interface QueueItem {
+  url: string;
+  fromUrl?: string;
+  viaLabel?: string;
+  viaSelector?: string;
+}
+
+/**
+ * Thrown when the crawl hits a login wall it can't get past on its own.
+ * The worker catches this specifically to pause the job (status = AWAITING_CREDENTIALS)
+ * instead of failing it outright, so the caller can submit credentials and resume.
+ */
+export class LoginRequiredError extends Error {
+  constructor(public loginUrl: string, public reason: 'no_credentials' | 'invalid_credentials') {
+    super(
+      reason === 'invalid_credentials'
+        ? 'Login failed with the provided credentials.'
+        : 'This page requires login to proceed.'
+    );
+    this.name = 'LoginRequiredError';
+  }
+}
+
+const USERNAME_FIELD_SELECTORS = [
+  'input[type="email"]',
+  'input[name="username"]',
+  'input[name="email"]',
+  'input[id*="user" i]',
+  'input[id*="email" i]',
+  'input[autocomplete="username"]',
+  'input[type="text"]'
+];
 
 export class PlaywrightCrawler {
   private visitedUrls = new Set<string>();
-  private queue: string[] = [];
+  private queue: QueueItem[] = [];
   private pagesData: any[] = [];
 
   /**
@@ -58,13 +97,14 @@ export class PlaywrightCrawler {
     page.setDefaultTimeout(10000);
 
     // Seed the queue
-    this.queue.push(options.startUrl);
+    this.queue.push({ url: options.startUrl });
     const startOrigin = new URL(options.startUrl).origin;
 
     try {
       while (this.queue.length > 0 && this.visitedUrls.size < maxPages) {
-        const currentUrl = this.queue.shift()!;
-        
+        const currentItem = this.queue.shift()!;
+        const currentUrl = currentItem.url;
+
         // Normalize URL path to prevent duplicate crawling of trailing slashes or search queries
         const normUrl = this.normalizeUrl(currentUrl);
         if (this.visitedUrls.has(normUrl)) {
@@ -79,8 +119,24 @@ export class PlaywrightCrawler {
           await page.goto(currentUrl, { waitUntil: 'domcontentloaded' });
           await page.waitForTimeout(1000); // Wait for animations/renders
 
+          // If the very first page of this crawl is behind a login wall, either log in
+          // with the supplied credentials or pause the crawl for the caller to provide them.
+          if (this.visitedUrls.size === 1 && (await page.locator('input[type="password"]').count()) > 0) {
+            if (!options.credentials) {
+              throw new LoginRequiredError(currentUrl, 'no_credentials');
+            }
+            const loggedIn = await this.attemptLogin(page, options.credentials);
+            if (!loggedIn) {
+              throw new LoginRequiredError(currentUrl, 'invalid_credentials');
+            }
+            console.log(`[Login] Authenticated successfully, resuming crawl at ${currentUrl}`);
+            await page.goto(currentUrl, { waitUntil: 'domcontentloaded' });
+            await page.waitForTimeout(1000);
+          }
+
           // 1. Page Metadata
           const pageMeta = await PageDiscovery.discover(page);
+          const html = await page.content();
 
           // 2. Navigation Discovery
           const navLinks = await NavigationDiscovery.discover(page);
@@ -92,11 +148,11 @@ export class PlaywrightCrawler {
               const linkUrlObj = new URL(fullUrl);
               const normLink = this.normalizeUrl(fullUrl);
 
-              if (linkUrlObj.origin === startOrigin && !this.visitedUrls.has(normLink) && !this.queue.includes(fullUrl)) {
+              if (linkUrlObj.origin === startOrigin && !this.visitedUrls.has(normLink) && !this.queue.some(item => item.url === fullUrl)) {
                 // Safety engine check on navigation
                 const safetyCheck = SafetyEngine.checkAction(link.label, link.selector, 'Navigate');
                 if (safetyCheck.safe) {
-                  this.queue.push(fullUrl);
+                  this.queue.push({ url: fullUrl, fromUrl: currentUrl, viaLabel: link.label, viaSelector: link.selector });
                 } else {
                   console.log(`[Safety Warning] Prevented queuing of potentially dangerous navigation: ${link.label} (${link.url})`);
                 }
@@ -145,17 +201,26 @@ export class PlaywrightCrawler {
             }
           }
 
-          // Store page extraction data
+          // Store page extraction data, including how this page was reached (which link/button, from which page)
           this.pagesData.push({
             url: pageMeta.url,
             title: pageMeta.title,
             breadcrumb: pageMeta.breadcrumb,
             domHash: pageMeta.domHash,
             domJson: pageMeta.domJson,
-            elements: uiElements
+            html,
+            elements: uiElements,
+            parentUrl: currentItem.fromUrl ? (new URL(currentItem.fromUrl).pathname + new URL(currentItem.fromUrl).search) : null,
+            viaLabel: currentItem.viaLabel || null,
+            viaSelector: currentItem.viaSelector || null
           });
 
         } catch (pageErr: any) {
+          // A login wall is a crawl-level condition the caller must resolve (submit credentials
+          // and resume), not a single bad page to skip over -- propagate it out of crawl().
+          if (pageErr instanceof LoginRequiredError) {
+            throw pageErr;
+          }
           console.error(`Failed to crawl page ${currentUrl}: ${pageErr?.message || pageErr}`);
         }
       }
@@ -166,6 +231,60 @@ export class PlaywrightCrawler {
     }
 
     return this.pagesData;
+  }
+
+  /**
+   * Best-effort login: fills the first plausible username/email field and the password
+   * field, then submits. Selectors are heuristic, like the rest of discovery -- won't
+   * handle 2FA, CAPTCHAs, or OAuth redirects.
+   *
+   * Success is judged primarily by the HTTP status of the submission response (a 4xx/5xx,
+   * e.g. a bare "401 Invalid credentials" page, is an unambiguous failure even if that page
+   * happens not to re-render a password field). Only when the form submits without a full
+   * page navigation (SPA-style fetch/XHR) do we fall back to "is a password field still
+   * present" -- that fallback is inherently guessable and can be fooled by a failure page
+   * that omits the form.
+   */
+  private async attemptLogin(page: PlaywrightPage, credentials: CrawlCredentials): Promise<boolean> {
+    let usernameField = null;
+    for (const selector of USERNAME_FIELD_SELECTORS) {
+      const locator = page.locator(selector).first();
+      if (await locator.count() > 0) {
+        usernameField = locator;
+        break;
+      }
+    }
+
+    const passwordField = page.locator('input[type="password"]').first();
+    if (!usernameField || (await passwordField.count()) === 0) {
+      return false;
+    }
+
+    await usernameField.fill(credentials.username);
+    await passwordField.fill(credentials.password);
+
+    const submitButton = page.locator('button[type="submit"], input[type="submit"]').first();
+
+    const [response] = await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => null),
+      (async () => {
+        if ((await submitButton.count()) > 0) {
+          await submitButton.click();
+        } else {
+          await passwordField.press('Enter');
+        }
+      })()
+    ]);
+
+    await page.waitForTimeout(1000);
+
+    if (response && !response.ok()) {
+      return false;
+    }
+
+    // No full navigation (SPA-style submit), or a 2xx/3xx response: fall back to
+    // checking whether a password field is still present.
+    return (await page.locator('input[type="password"]').count()) === 0;
   }
 
   private normalizeUrl(urlStr: string): string {

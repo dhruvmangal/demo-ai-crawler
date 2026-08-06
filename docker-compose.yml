@@ -27,6 +27,29 @@ services:
       - neo4jdata:/data
       - neo4jlogs:/logs
 
+  llm:
+    image: ollama/ollama:latest
+    container_name: crawler_llm
+    ports:
+      - "11434:11434"
+    environment:
+      - OLLAMA_MODEL=qwen2.5:3b-instruct
+    volumes:
+      - ollamadata:/root/.ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "$$OLLAMA_MODEL"
+        wait
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ollama list | grep -q \"$$OLLAMA_MODEL\""]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
   crawler-app:
     build: .
     container_name: crawler_app
@@ -38,11 +61,60 @@ services:
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=crawler_neo4j_password
+      - RECORDINGS_DIR=/usr/src/app/recordings
+    volumes:
+      - recordings:/usr/src/app/recordings
     depends_on:
       - postgres
       - neo4j
+
+  crawl-worker:
+    build: .
+    container_name: crawler_worker
+    command: node dist/workers/crawl-worker.js
+    environment:
+      - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=crawler_neo4j_password
+      - OLLAMA_URL=http://llm:11434
+      - OLLAMA_MODEL=qwen2.5:3b-instruct
+      - AI_SUMMARIZATION_ENABLED=true
+    depends_on:
+      - postgres
+      - neo4j
+      - llm
+
+  # Playwright recording agent: polls workflow_runs, replays a workflow's steps in a
+  # fresh headless browser, records video, and writes WebVTT captions built from the
+  # AI summaries/descriptions + entities the crawl already collected for those steps.
+  # Shares the `recordings` volume with crawler-app, which serves it at /recordings/*.
+  workflow-agent-worker:
+    build: .
+    container_name: crawler_workflow_agent
+    command: node dist/workers/workflow-agent-worker.js
+    environment:
+      - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
+      - RECORDINGS_DIR=/usr/src/app/recordings
+    volumes:
+      - recordings:/usr/src/app/recordings
+    depends_on:
+      - postgres
+
+  # Build-only container: bundles the Chrome extension (TypeScript + Three.js) into
+  # ./extension/dist with esbuild, then exits. A browser extension can't "run" in a
+  # headless container, so load ./extension/dist unpacked in Chrome after this builds
+  # (chrome://extensions -> Developer mode -> Load unpacked). Rebuild after source
+  # changes with: docker compose up -d --build extension-builder
+  extension-builder:
+    build: ./extension
+    container_name: crawler_extension_builder
+    volumes:
+      - ./extension/dist:/app/dist
 
 volumes:
   pgdata:
   neo4jdata:
   neo4jlogs:
+  ollamadata:
+  recordings:

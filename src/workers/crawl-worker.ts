@@ -1,5 +1,5 @@
 import { query } from '../config/database';
-import { PlaywrightCrawler } from '../crawler/playwright-crawler';
+import { PlaywrightCrawler, LoginRequiredError, CrawlCredentials } from '../crawler/playwright-crawler';
 import { KnowledgeBuilder } from '../knowledge/knowledge-builder';
 import { KnowledgeSummarizer } from '../knowledge/knowledge-summarizer';
 
@@ -27,12 +27,25 @@ async function processNextJob() {
   const job = selectRes.rows[0];
   console.log(`[Crawl Worker] Processing Job ${job.id} for Project ${job.project_id} (Target: ${job.target_url})`);
 
+  // Consume any credentials submitted for this job (one-time use: delete immediately, before
+  // even attempting login, so they never linger regardless of how the crawl turns out).
+  let credentials: CrawlCredentials | undefined;
+  const credRes = await query(
+    `SELECT username, password FROM crawl_credentials WHERE crawl_job_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [job.id]
+  );
+  if ((credRes.rowCount ?? 0) > 0) {
+    credentials = { username: credRes.rows[0].username, password: credRes.rows[0].password };
+    await query(`DELETE FROM crawl_credentials WHERE crawl_job_id = $1`, [job.id]);
+  }
+
   try {
     const crawler = new PlaywrightCrawler();
     const rawPages = await crawler.crawl({
       projectId: job.project_id,
       startUrl: job.target_url,
-      maxPages: 10
+      maxPages: 10,
+      credentials
     });
 
     // Save outputs using KnowledgeBuilder (inserts SQL, pushes to Neo4j)
@@ -51,6 +64,19 @@ async function processNextJob() {
     console.log(`[Crawl Worker] Job ${job.id} successfully finished!`);
 
   } catch (err: any) {
+    if (err instanceof LoginRequiredError) {
+      // Pause, don't fail: the caller can submit credentials via
+      // POST /api/crawl/:id/credentials, which flips status back to PENDING for us to retry.
+      await query(
+        `UPDATE crawl_jobs
+         SET status = 'AWAITING_CREDENTIALS', login_url = $1, error_message = $2
+         WHERE id = $3`,
+        [err.loginUrl, err.message, job.id]
+      );
+      console.log(`[Crawl Worker] Job ${job.id} awaiting credentials (${err.reason}) at ${err.loginUrl}`);
+      return;
+    }
+
     console.error(`[Crawl Worker] Job ${job.id} failed:`, err);
     await query(
       `UPDATE crawl_jobs

@@ -11,6 +11,7 @@ export class GraphProjection {
     projectId: string,
     data: {
       pages: Page[];
+      uiElements: UiElement[];
       entities: Entity[];
       actions: Action[];
       relationships: Relationship[];
@@ -36,26 +37,66 @@ export class GraphProjection {
             projectId: $projectId,
             url: $url,
             title: $title,
-            breadcrumb: $breadcrumb
+            breadcrumb: $breadcrumb,
+            viaLabel: $viaLabel,
+            viaSelector: $viaSelector,
+            aiSummary: $aiSummary,
+            aiDescription: $aiDescription
           })`,
           {
             id: page.id,
             projectId,
             url: page.url,
             title: page.title,
-            breadcrumb: page.breadcrumb || ''
+            breadcrumb: page.breadcrumb || '',
+            viaLabel: page.viaLabel || '',
+            viaSelector: page.viaSelector || '',
+            aiSummary: page.aiSummary || '',
+            aiDescription: page.aiDescription || ''
           }
         );
       }
 
-      // Establish Page parent-child relationships
+      // Insert UI Elements as Component nodes, linked from their Page, carrying the
+      // LLM-generated description of what that specific component does.
+      for (const el of data.uiElements) {
+        await session.run(
+          `MATCH (p:Page {id: $pageId})
+           CREATE (c:Component {
+             id: $id,
+             projectId: $projectId,
+             type: $type,
+             label: $label,
+             selector: $selector,
+             aiDescription: $aiDescription
+           })
+           CREATE (p)-[:HAS_COMPONENT]->(c)`,
+          {
+            id: el.id,
+            projectId,
+            pageId: el.pageId,
+            type: el.type,
+            label: el.label,
+            selector: el.selector,
+            aiDescription: el.aiDescription || ''
+          }
+        );
+      }
+
+      // Establish Page parent-child relationships, carrying the label/selector of the
+      // link or button that was clicked to navigate from parent to child (if known).
       for (const page of data.pages) {
         if (page.parentPageId) {
           await session.run(
             `MATCH (child:Page {id: $childId}), (parent:Page {id: $parentId})
-             CREATE (parent)-[:HAS_PAGE]->(child)
-             CREATE (child)-[:CHILD_OF]->(parent)`,
-            { childId: page.id, parentId: page.parentPageId }
+             CREATE (parent)-[:HAS_PAGE {label: $label, selector: $selector}]->(child)
+             CREATE (child)-[:CHILD_OF {label: $label, selector: $selector}]->(parent)`,
+            {
+              childId: page.id,
+              parentId: page.parentPageId,
+              label: page.viaLabel || '',
+              selector: page.viaSelector || ''
+            }
           );
         }
       }

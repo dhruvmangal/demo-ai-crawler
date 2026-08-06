@@ -44,7 +44,7 @@ router.get('/crawl/:id', async (req: Request, res: Response) => {
 
   try {
     const jobRes = await query(
-      `SELECT id, project_id, target_url, status, started_at, completed_at, error_message
+      `SELECT id, project_id, target_url, status, login_url, started_at, completed_at, error_message
        FROM crawl_jobs WHERE id = $1`,
       [id]
     );
@@ -54,6 +54,49 @@ router.get('/crawl/:id', async (req: Request, res: Response) => {
     }
 
     return res.json(jobRes.rows[0]);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/crawl/:id/credentials
+ * Submits login credentials for a job that is paused awaiting them (status AWAITING_CREDENTIALS).
+ * Credentials are held in crawl_credentials only transiently -- the worker deletes the row
+ * as soon as it reads it, whether or not the login attempt succeeds.
+ */
+router.post('/crawl/:id/credentials', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ error: 'username and password are required' });
+  }
+
+  try {
+    const jobRes = await query(`SELECT id, status FROM crawl_jobs WHERE id = $1`, [id]);
+
+    if (jobRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Crawl job not found' });
+    }
+    if (jobRes.rows[0].status !== 'AWAITING_CREDENTIALS') {
+      return res.status(409).json({
+        error: `Job is not awaiting credentials (current status: ${jobRes.rows[0].status})`
+      });
+    }
+
+    // Replace any prior submission for this job, then hand it back to the worker.
+    await query(`DELETE FROM crawl_credentials WHERE crawl_job_id = $1`, [id]);
+    await query(
+      `INSERT INTO crawl_credentials (crawl_job_id, username, password) VALUES ($1, $2, $3)`,
+      [id, username, password]
+    );
+    await query(
+      `UPDATE crawl_jobs SET status = 'PENDING', error_message = NULL WHERE id = $1`,
+      [id]
+    );
+
+    return res.json({ message: 'Credentials submitted; crawl will resume shortly.' });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -115,6 +158,63 @@ router.get('/graph/:projectId', async (req: Request, res: Response) => {
     return res.status(500).json({ error: err.message });
   } finally {
     await session.close();
+  }
+});
+
+/**
+ * POST /api/workflows/:workflowId/run
+ * Queues a Playwright recording of a workflow: a worker replays its steps in a fresh
+ * headless browser, records video, and generates captions from the AI summaries/
+ * descriptions and entities already collected for those steps.
+ */
+router.post('/workflows/:workflowId/run', async (req: Request, res: Response) => {
+  const { workflowId } = req.params;
+
+  try {
+    const workflowRes = await query(`SELECT id, project_id FROM workflows WHERE id = $1`, [workflowId]);
+    if (workflowRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Workflow not found' });
+    }
+
+    const runRes = await query(
+      `INSERT INTO workflow_runs (workflow_id, project_id, status)
+       VALUES ($1, $2, 'PENDING')
+       RETURNING id, workflow_id, project_id, status, created_at`,
+      [workflowId, workflowRes.rows[0].project_id]
+    );
+
+    return res.status(201).json({
+      message: 'Workflow recording queued successfully',
+      run: runRes.rows[0]
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/workflow-runs/:id
+ * Fetches status of a workflow recording run. Once COMPLETED, video_path/captions_path
+ * are filenames servable under /recordings/*.
+ */
+router.get('/workflow-runs/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  try {
+    const runRes = await query(
+      `SELECT id, workflow_id, project_id, status, video_path, captions_path,
+              error_message, started_at, completed_at
+       FROM workflow_runs WHERE id = $1`,
+      [id]
+    );
+
+    if (runRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Workflow run not found' });
+    }
+
+    return res.json(runRes.rows[0]);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
   }
 });
 

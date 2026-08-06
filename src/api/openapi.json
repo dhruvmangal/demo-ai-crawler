@@ -1,0 +1,271 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Website Discovery & Knowledge Graph Builder",
+    "description": "Crawls a target website, discovers pages/navigation/UI elements, and builds a relational + graph knowledge base (Postgres + Neo4j) describing the site's structure and workflows.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    { "url": "/", "description": "Current server" }
+  ],
+  "tags": [
+    { "name": "Health", "description": "Service health check" },
+    { "name": "Crawl", "description": "Queue and track website crawl jobs" },
+    { "name": "Knowledge", "description": "Read back the extracted knowledge graph and summary" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "healthy" },
+                    "timestamp": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/crawl": {
+      "post": {
+        "tags": ["Crawl"],
+        "summary": "Queue a website discovery crawl",
+        "description": "Inserts a PENDING crawl_jobs row. The crawl-worker service polls for pending jobs, runs the Playwright crawl, and builds the knowledge graph asynchronously.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["targetUrl"],
+                "properties": {
+                  "targetUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "example": "https://example.com"
+                  },
+                  "projectId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Optional. Reuse an existing project ID to re-crawl into the same project; omit to start a new project."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Crawl job queued",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CrawlJobResponse" }
+              }
+            }
+          },
+          "400": { "description": "targetUrl is required" },
+          "500": { "description": "Server error" }
+        }
+      }
+    },
+    "/api/crawl/{id}": {
+      "get": {
+        "tags": ["Crawl"],
+        "summary": "Get crawl job status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "Crawl job ID returned by POST /api/crawl"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Crawl job status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CrawlJob" }
+              }
+            }
+          },
+          "404": { "description": "Crawl job not found" },
+          "500": { "description": "Server error" }
+        }
+      }
+    },
+    "/api/crawl/{id}/credentials": {
+      "post": {
+        "tags": ["Crawl"],
+        "summary": "Submit login credentials for a paused crawl",
+        "description": "When a crawl hits a login wall on its start page, the job pauses with status AWAITING_CREDENTIALS and login_url set. Submit credentials here to resume it -- the worker logs in with Playwright and continues the crawl authenticated. Credentials are held only transiently: the worker deletes them from the database as soon as it reads them, whether or not the login attempt succeeds.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "Crawl job ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "password"],
+                "properties": {
+                  "username": { "type": "string", "example": "demo@example.com" },
+                  "password": { "type": "string", "format": "password" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Credentials accepted; job set back to PENDING for the worker to retry" },
+          "400": { "description": "username and password are required" },
+          "404": { "description": "Crawl job not found" },
+          "409": { "description": "Job is not currently awaiting credentials" },
+          "500": { "description": "Server error" }
+        }
+      }
+    },
+    "/api/graph/{projectId}": {
+      "get": {
+        "tags": ["Knowledge"],
+        "summary": "Get the project's knowledge graph",
+        "description": "Returns all Neo4j nodes (Page, Entity, Action, Workflow, WorkflowStep) and edges (HAS_PAGE/CHILD_OF with the clicked label+selector, RELATED_TO, HAS_ACTION, HAS_STEP, NEXT_STEP, etc.) for the project.",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Graph projection",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GraphResponse" }
+              }
+            }
+          },
+          "500": { "description": "Server error" }
+        }
+      }
+    },
+    "/api/summary/{projectId}": {
+      "get": {
+        "tags": ["Knowledge"],
+        "summary": "Get the project's high-level knowledge summary",
+        "description": "Returns a lightweight domain summary (main entities, main workflows, discovered page count) intended to save downstream AI token usage compared to reading the full graph.",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge summary",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SummaryResponse" }
+              }
+            }
+          },
+          "404": { "description": "Summary not found for this project" },
+          "500": { "description": "Server error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CrawlJob": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "project_id": { "type": "string", "format": "uuid" },
+          "target_url": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["PENDING", "RUNNING", "AWAITING_CREDENTIALS", "COMPLETED", "FAILED"]
+          },
+          "login_url": {
+            "type": "string",
+            "nullable": true,
+            "description": "Set when status is AWAITING_CREDENTIALS: the page that needs login. POST credentials to /api/crawl/{id}/credentials to resume."
+          },
+          "started_at": { "type": "string", "format": "date-time", "nullable": true },
+          "completed_at": { "type": "string", "format": "date-time", "nullable": true },
+          "error_message": { "type": "string", "nullable": true }
+        }
+      },
+      "CrawlJobResponse": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string", "example": "Crawl job queued successfully" },
+          "job": { "$ref": "#/components/schemas/CrawlJob" }
+        }
+      },
+      "GraphNode": {
+        "type": "object",
+        "properties": {
+          "labels": { "type": "array", "items": { "type": "string" } },
+          "properties": { "type": "object" }
+        }
+      },
+      "GraphEdge": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "example": "HAS_PAGE" },
+          "source": { "type": "string" },
+          "target": { "type": "string" },
+          "properties": { "type": "object" }
+        }
+      },
+      "GraphResponse": {
+        "type": "object",
+        "properties": {
+          "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/GraphNode" } },
+          "edges": { "type": "array", "items": { "$ref": "#/components/schemas/GraphEdge" } }
+        }
+      },
+      "SummaryResponse": {
+        "type": "object",
+        "properties": {
+          "domain": { "type": "string" },
+          "summary_data": {
+            "type": "object",
+            "properties": {
+              "domain": { "type": "string" },
+              "timestamp": { "type": "string", "format": "date-time" },
+              "mainEntities": { "type": "array", "items": { "type": "string" } },
+              "mainWorkflows": { "type": "array", "items": { "type": "object" } },
+              "discoveredPagesCount": { "type": "integer" }
+            }
+          },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

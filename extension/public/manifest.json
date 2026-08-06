@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "J.A.R.V.I.S. — Site Intelligence",
+  "version": "1.0.0",
+  "description": "Crawls the active site through the Knowledge Graph Builder and reveals its page tree and workflows in a HUD-style side panel.",
+  "action": {
+    "default_title": "Open J.A.R.V.I.S."
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "permissions": ["sidePanel", "activeTab", "storage"],
+  "host_permissions": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -44,8 +44,12 @@ async function runTest() {
     const finalPagesOutput: any[] = [];
 
     // Query elements, actions, relationships back from Postgres to verify persistence
-    const pagesRes = await query(`SELECT id, title, url FROM pages WHERE project_id = $1`, [projectId]);
-    
+    const pagesRes = await query(
+      `SELECT id, title, url, parent_page_id, via_label, via_selector FROM pages WHERE project_id = $1`,
+      [projectId]
+    );
+    const pageIdToUrl = new Map(pagesRes.rows.map((p: any) => [p.id, p.url]));
+
     for (const page of pagesRes.rows) {
       // Get actions
       const elementsRes = await query(
@@ -72,6 +76,8 @@ async function runTest() {
       const pageOutput = {
         page: page.title,
         url: page.url,
+        reachedFrom: page.parent_page_id ? pageIdToUrl.get(page.parent_page_id) : null,
+        navigateVia: page.via_label ? { label: page.via_label, selector: page.via_selector } : null,
         actions: buttons,
         forms,
         tables,
