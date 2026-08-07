@@ -1,6 +1,9 @@
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5:3b-instruct';
-const DEFAULT_REQUEST_TIMEOUT_MS = 60000;
+// CPU-only inference of a 3B model is slow: a single page-summary call (6KB of HTML +
+// a description per UI element) routinely runs past a minute, so 60s aborted most calls
+// mid-generation and discarded the result. Default to 180s and allow tuning via env.
+const DEFAULT_REQUEST_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS) || 180000;
 
 export class OllamaClient {
   /**

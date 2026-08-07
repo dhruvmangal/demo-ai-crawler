@@ -57,6 +57,9 @@ export class PlaywrightCrawler {
   private visitedUrls = new Set<string>();
   private queue: QueueItem[] = [];
   private pagesData: any[] = [];
+  // First page-load failure seen this crawl. Surfaced only if the crawl ends up
+  // with zero usable pages -- typically the entry URL failing to load.
+  private firstPageError: Error | null = null;
 
   /**
    * Runs the crawl workflow, attaching to / starting Playwright session, discovering and extracting UI.
@@ -221,6 +224,7 @@ export class PlaywrightCrawler {
           if (pageErr instanceof LoginRequiredError) {
             throw pageErr;
           }
+          if (!this.firstPageError) this.firstPageError = pageErr;
           console.error(`Failed to crawl page ${currentUrl}: ${pageErr?.message || pageErr}`);
         }
       }
@@ -228,6 +232,14 @@ export class PlaywrightCrawler {
       if (browser) {
         await browser.close();
       }
+    }
+
+    // A crawl that reached no pages is a failure, not an empty success -- surface the
+    // underlying navigation error (e.g. the entry URL not resolving) so the caller can
+    // mark the job FAILED instead of projecting an empty graph that reads as "no results".
+    if (this.pagesData.length === 0) {
+      const detail = this.firstPageError?.message || 'no reachable pages were found';
+      throw new Error(`Crawl reached no pages at ${options.startUrl}: ${detail}`);
     }
 
     return this.pagesData;
