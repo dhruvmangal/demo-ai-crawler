@@ -19,7 +19,7 @@ app.innerHTML = `
     <div class="hud-title">
       <span class="hud-glyph">◈</span>
       <div>
-        <h1>J.A.R.V.I.S.</h1>
+        <h1>Narreto</h1>
         <p class="hud-subtitle">SITE INTELLIGENCE INTERFACE</p>
       </div>
     </div>

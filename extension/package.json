@@ -1,5 +1,5 @@
 {
-  "name": "jarvis-site-intel-extension",
+  "name": "narreto-site-intel-extension",
   "version": "1.0.0",
   "private": true,
   "description": "Chrome side-panel extension: crawls the active site via the crawler API and renders a HUD-style page tree + workflow picker",

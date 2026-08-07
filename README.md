@@ -227,7 +227,7 @@ extension/        Chrome side-panel extension (see below)
 
 ## Chrome extension
 
-`extension/` is a Manifest V3 Chrome extension with a HUD-style ("Jarvis") side
+`extension/` is a Manifest V3 Chrome extension with a HUD-style ("Narreto") side
 panel: click the toolbar icon, it targets the active tab's URL, POSTs to
 `/api/crawl`, and while the job runs shows a Three.js animation of neurons
 firing across tumbling rings. Once the job hits `COMPLETED`, it fetches

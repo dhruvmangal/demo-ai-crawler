@@ -59,7 +59,7 @@ function encodePNG(width, height, rgba) {
   ]);
 }
 
-// Dark HUD backdrop with a glowing cyan arc-reactor ring + core, Jarvis-style.
+// Dark HUD backdrop with a glowing cyan arc-reactor ring + core, Narreto-style.
 function drawArcReactor(size) {
   const rgba = Buffer.alloc(size * size * 4);
   const cx = size / 2;
