@@ -10,24 +10,36 @@ function escapeVtt(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\s+/g, ' ').trim();
 }
 
-/** Builds one caption line per step from the AI descriptions/entities already collected during the crawl. */
-export function buildCaptionText(step: WorkflowRunStep, actionSkipped: boolean): string {
-  const parts: string[] = [];
+/**
+ * Builds one caption line per step. Prefers the orchestrating agent's own narration
+ * of what it did (see workflow-orchestrator.ts); falls back to a static template
+ * built from the AI descriptions/entities collected during the crawl when no
+ * narration is available (e.g. the agent path wasn't used for this step).
+ */
+export function buildCaptionText(step: WorkflowRunStep, actionSkipped: boolean, narration?: string): string {
+  let body: string;
 
-  if (step.actionType && step.entityName) {
-    parts.push(`${step.actionType} ${step.entityName}`);
-  } else if (step.actionType) {
-    parts.push(step.actionType);
+  if (narration) {
+    body = narration;
+  } else {
+    const parts: string[] = [];
+
+    if (step.actionType && step.entityName) {
+      parts.push(`${step.actionType} ${step.entityName}`);
+    } else if (step.actionType) {
+      parts.push(step.actionType);
+    }
+
+    const description = step.pageAiDescription || step.pageAiSummary;
+    if (description) {
+      parts.push(description);
+    } else if (step.pageTitle) {
+      parts.push(`Viewing ${step.pageTitle}`);
+    }
+
+    body = parts.length > 0 ? parts.join(' — ') : step.pageUrl || 'Unknown step';
   }
 
-  const description = step.pageAiDescription || step.pageAiSummary;
-  if (description) {
-    parts.push(description);
-  } else if (step.pageTitle) {
-    parts.push(`Viewing ${step.pageTitle}`);
-  }
-
-  const body = parts.length > 0 ? parts.join(' — ') : step.pageUrl || 'Unknown step';
   const suffix = actionSkipped ? ' (action skipped for safety)' : '';
   return escapeVtt(`Step ${step.stepNumber}: ${body}${suffix}`);
 }

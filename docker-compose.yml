@@ -85,10 +85,12 @@ services:
       - neo4j
       - llm
 
-  # Playwright recording agent: polls workflow_runs, replays a workflow's steps in a
-  # fresh headless browser, records video, and writes WebVTT captions built from the
-  # AI summaries/descriptions + entities the crawl already collected for those steps.
+  # Playwright recording agent: polls workflow_runs, and for each step, an LLM-driven
+  # orchestrator (workflow-orchestrator.ts) acts through a Playwright-MCP-style tool
+  # surface (browser-tools.ts) to carry out and narrate the step in a fresh headless
+  # browser, recording video and writing WebVTT captions from the agent's narration.
   # Shares the `recordings` volume with crawler-app, which serves it at /recordings/*.
+  # Requires ANTHROPIC_API_KEY to be set in the shell environment or a .env file.
   workflow-agent-worker:
     build: .
     container_name: crawler_workflow_agent
@@ -96,6 +98,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
       - RECORDINGS_DIR=/usr/src/app/recordings
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
       - recordings:/usr/src/app/recordings
     depends_on:

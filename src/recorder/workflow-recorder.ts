@@ -1,9 +1,9 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
-import { SafetyEngine } from '../safety/safety-engine';
 import { WorkflowRunStep } from '../types/workflow-runs';
 import { buildCaptionText, buildVtt, Cue } from './caption-builder';
+import { WorkflowOrchestrator } from '../agent/workflow-orchestrator';
 
 export interface RecordingResult {
   videoPath: string;
@@ -16,8 +16,9 @@ const MIN_CUE_MS = 1500;
 /**
  * Replays a workflow's steps in a fresh headless browser (independent of the user's
  * live tab -- Playwright's built-in video recording needs a context it launched itself),
- * recording video and building a WebVTT caption track from the AI summaries/descriptions
- * and entity/action data already collected during the crawl.
+ * recording video and building a WebVTT caption track. Each step is carried out by
+ * WorkflowOrchestrator -- an LLM-driven agent that acts through a Playwright tool
+ * surface and narrates what it did, rather than blindly replaying a stored selector.
  */
 export class WorkflowRecorder {
   constructor(private recordingsDir: string) {}
@@ -45,36 +46,13 @@ export class WorkflowRecorder {
         // (e.g. a step with no navigation/action finishes in ~STEP_DWELL_MS < MIN_CUE_MS),
         // so clamp the next cue's start to the previous cue's end rather than real time.
         const cueStartMs = Math.max(Date.now() - recordingStart, cursorMs);
-        let actionSkipped = false;
 
-        if (step.pageUrl) {
-          try {
-            await page.goto(step.pageUrl, { waitUntil: 'domcontentloaded' });
-            await page.waitForTimeout(500);
-          } catch (err) {
-            console.warn(`[WorkflowRecorder] Step ${step.stepNumber}: navigation to ${step.pageUrl} failed:`, err);
-          }
-        }
-
-        if (step.actionType && step.actionSelector) {
-          const safety = SafetyEngine.checkAction(step.actionType, step.actionSelector, step.actionType);
-          if (safety.safe) {
-            try {
-              await page.click(step.actionSelector, { timeout: 5000 });
-              await page.waitForTimeout(500);
-            } catch (err) {
-              console.warn(`[WorkflowRecorder] Step ${step.stepNumber}: click "${step.actionSelector}" failed:`, err);
-            }
-          } else {
-            actionSkipped = true;
-            console.warn(`[WorkflowRecorder] Step ${step.stepNumber}: skipped unsafe action — ${safety.reason}`);
-          }
-        }
-
+        const { narration, actionSkipped } = await WorkflowOrchestrator.runStep(page, step);
         await page.waitForTimeout(STEP_DWELL_MS);
+
         const cueEndMs = Math.max(Date.now() - recordingStart, cueStartMs + MIN_CUE_MS);
         cursorMs = cueEndMs;
-        cues.push({ startMs: cueStartMs, endMs: cueEndMs, text: buildCaptionText(step, actionSkipped) });
+        cues.push({ startMs: cueStartMs, endMs: cueEndMs, text: buildCaptionText(step, actionSkipped, narration) });
       }
     } finally {
       await context.close(); // finalizes the video file
