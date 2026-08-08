@@ -1,0 +1,15 @@
+node_modules/
+dist/
+
+# Playwright recordings written by workflow-agent-worker when run outside Docker
+recordings/
+
+# Output of `npm run test:mock`
+output_schema.json
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
+*.log
