@@ -1,7 +1,8 @@
 .PHONY: help install build up start down stop restart rebuild \
         logs logs-api logs-worker logs-recorder ps status health \
         db-shell db-migrate db-empty db-reset clean \
-        mock-server crawl-mock test docs
+        mock-server crawl-mock test docs \
+        extension extension-watch
 
 COMPOSE := docker compose
 
@@ -10,7 +11,7 @@ COMPOSE := docker compose
 help: ## Show this help
 	@echo "Usage: make <target>"
 	@echo ""
-	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ { printf "  %-16s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 ## --- Lifecycle ---
 
@@ -92,6 +93,25 @@ db-reset: ## Stop everything and permanently delete the Postgres/Neo4j volumes (
 	fi
 
 clean: db-reset ## Alias for 'db-reset'
+
+## --- Chrome extension ---
+
+# The extension-builder image COPYs the extension source in at image-build time, so the
+# image has to be rebuilt for the bundle to pick up source changes -- hence build + run,
+# not run alone. It writes into ./extension/dist through the bind mount, then exits.
+extension: ## Build the Chrome extension bundle into extension/dist (no local Node needed)
+	$(COMPOSE) build extension-builder
+	$(COMPOSE) run --rm extension-builder
+	@echo ""
+	@echo "Extension bundled into ./extension/dist"
+	@echo "Load it in Chrome: chrome://extensions -> Developer mode -> Load unpacked -> $(CURDIR)/extension/dist"
+
+extension-watch: ## Rebuild the extension on every source change (Ctrl-C to stop)
+	$(COMPOSE) build extension-builder
+	$(COMPOSE) run --rm \
+		-v "$(CURDIR)/extension/src:/app/src" \
+		-v "$(CURDIR)/extension/public:/app/public" \
+		extension-builder node build.js --watch
 
 ## --- Demo ---
 
