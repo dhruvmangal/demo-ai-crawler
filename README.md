@@ -19,6 +19,7 @@ Results are persisted to Postgres (relational) and projected into Neo4j
 | Service | What it does | Port |
 |---|---|---|
 | `crawler-app` | Express API — queues crawl jobs, serves results, serves recorded videos/captions at `/recordings/*` | `3000` |
+| `admin` | Admin backoffice (unauthenticated) — separate container/port from `crawler-app` so it can be kept off the public internet independently | `3001` |
 | `crawl-worker` | Polls Postgres for `PENDING` jobs, runs the Playwright crawl, builds the knowledge graph | — |
 | `workflow-agent-worker` | Polls Postgres for `PENDING` `workflow_runs`, replays a workflow's steps in a fresh headless Playwright browser, records video, writes WebVTT captions | — |
 | `postgres` | Relational store: `crawl_jobs`, `pages`, `ui_elements`, `entities`, `actions`, `relationships`, `workflows`, `workflow_runs`, `knowledge_summaries` | `5432` |
@@ -150,8 +151,11 @@ docker compose logs -f workflow-agent-worker
 A dashboard over everything the service has produced lives at:
 
 ```
-http://localhost:3000/admin
+http://localhost:3001/admin
 ```
+
+It runs as its own container (`admin`, `src/api/admin-server.ts`) on its own port,
+separate from the public API (`crawler-app`, port 3000) — see below for why.
 
 It lists every crawl request (`crawl_jobs`) newest-first with live status, and
 for the selected one shows four tabs: **Overview** (job timings, extracted
@@ -164,11 +168,16 @@ narration track inline), and **Pages** (the discovered page table with AI
 descriptions).
 
 It polls every 5 seconds, so a crawl or recording can be watched from `PENDING`
-through to a playable video. It is served by `crawler-app` from `public/admin/`
-and reads `/api/admin/*`, `/api/graph/*` and `/recordings/*` — all read-only
-except the *Record video* button, which posts to the existing
-`/api/workflows/:id/run`. **There is no authentication**: it exposes every
-crawl's data, so keep port 3000 off the public internet.
+through to a playable video. It is served by the `admin` container from
+`public/admin/` and reads `/api/admin/*`, `/api/graph/*` and `/recordings/*` —
+all read-only except the *Record video* button, which posts to
+`/api/workflows/:id/run`. The latter two endpoints are also mounted on
+`crawler-app` (they're general API endpoints, not admin-only); the handlers
+are shared via `src/api/graph-routes.ts` and `src/api/workflow-run-routes.ts`
+so the logic isn't duplicated. **There is no authentication**: it exposes
+every crawl's data, so keep port 3001 off the public internet (this is also
+why it's a separate container/port from the API in the first place — so it
+can be firewalled off independently of port 3000).
 
 ### Demo without a real target site
 
@@ -196,7 +205,7 @@ Set via environment variables (see `docker-compose.yml`):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PORT` | `3000` | API server port |
+| `PORT` | `3000` (`crawler-app`) / `3001` (`admin`) | Server port; each container sets its own |
 | `DATABASE_URL` | `postgresql://crawler_user:crawler_password@localhost:5432/crawler_db` | Postgres connection string |
 | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j bolt connection |
 | `NEO4J_USER` / `NEO4J_PASSWORD` | `neo4j` / `crawler_neo4j_password` | Neo4j credentials |
@@ -235,7 +244,8 @@ Set via environment variables (see `docker-compose.yml`):
 src/
   agent/          LLM orchestrator + Playwright tool surface used when replaying
                   a workflow for recording
-  api/            Express app, routes (incl. admin-routes.ts), OpenAPI spec
+  api/            Express app (server.ts) + standalone admin server
+                  (admin-server.ts), routes (incl. admin-routes.ts), OpenAPI spec
   config/         Postgres pool + Neo4j driver setup
   crawler/        Playwright-driven crawl loop
   discovery/      Page metadata, navigation links, UI element discovery
@@ -247,7 +257,8 @@ src/
   workers/        Background job processors (crawl, demo planning)
   types/          Shared TypeScript types
 public/
-  admin/          Admin backoffice page (static, served at /admin)
+  admin/          Admin backoffice page (static, served by the `admin`
+                  container at /admin, port 3001)
 init.sql          Postgres schema
 docker-compose.yml
 Dockerfile

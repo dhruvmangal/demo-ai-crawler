@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../config/database';
-import { getNeo4jDriver } from '../config/neo4j';
 import { v4 as uuidv4 } from 'uuid';
+import { graphRouter } from './graph-routes';
+import { workflowRunRouter } from './workflow-run-routes';
 
 export const router = Router();
 
@@ -104,93 +105,19 @@ router.post('/crawl/:id/credentials', async (req: Request, res: Response) => {
 
 /**
  * GET /api/graph/:projectId
- * Returns Neo4j nodes and edges projection for visualization.
+ * Returns Neo4j nodes and edges projection for visualization. Handler lives in
+ * graph-routes.ts so the standalone admin server can mount it too.
  */
-router.get('/graph/:projectId', async (req: Request, res: Response) => {
-  const { projectId } = req.params;
-  const driver = getNeo4jDriver();
-  const session = driver.session();
-
-  try {
-    // Retrieve pages, actions, workflows, entities and their relationships
-    const result = await session.run(
-      `MATCH (n) WHERE n.projectId = $projectId
-       OPTIONAL MATCH (n)-[r]->(m)
-       RETURN n, r, m`,
-      { projectId }
-    );
-
-    const nodes = new Map<string, any>();
-    const edges: any[] = [];
-
-    result.records.forEach(record => {
-      const nodeA = record.get('n');
-      const edge = record.get('r');
-      const nodeB = record.get('m');
-
-      if (nodeA) {
-        nodes.set(nodeA.properties.id || nodeA.elementId, {
-          labels: nodeA.labels,
-          properties: nodeA.properties
-        });
-      }
-      if (nodeB) {
-        nodes.set(nodeB.properties.id || nodeB.elementId, {
-          labels: nodeB.labels,
-          properties: nodeB.properties
-        });
-      }
-      if (edge) {
-        edges.push({
-          type: edge.type,
-          source: edge.startNodeId || nodeA.properties.id || nodeA.elementId,
-          target: edge.endNodeId || nodeB.properties.id || nodeB.elementId,
-          properties: edge.properties
-        });
-      }
-    });
-
-    return res.json({
-      nodes: Array.from(nodes.values()),
-      edges
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  } finally {
-    await session.close();
-  }
-});
+router.use('/graph', graphRouter);
 
 /**
  * POST /api/workflows/:workflowId/run
  * Queues a Playwright recording of a workflow: a worker replays its steps in a fresh
  * headless browser, records video, and generates captions from the AI summaries/
- * descriptions and entities already collected for those steps.
+ * descriptions and entities already collected for those steps. Handler lives in
+ * workflow-run-routes.ts so the standalone admin server can mount it too.
  */
-router.post('/workflows/:workflowId/run', async (req: Request, res: Response) => {
-  const { workflowId } = req.params;
-
-  try {
-    const workflowRes = await query(`SELECT id, project_id FROM workflows WHERE id = $1`, [workflowId]);
-    if (workflowRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Workflow not found' });
-    }
-
-    const runRes = await query(
-      `INSERT INTO workflow_runs (workflow_id, project_id, status)
-       VALUES ($1, $2, 'PENDING')
-       RETURNING id, workflow_id, project_id, status, created_at`,
-      [workflowId, workflowRes.rows[0].project_id]
-    );
-
-    return res.status(201).json({
-      message: 'Workflow recording queued successfully',
-      run: runRes.rows[0]
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+router.use('/workflows', workflowRunRouter);
 
 /**
  * GET /api/workflow-runs/:id

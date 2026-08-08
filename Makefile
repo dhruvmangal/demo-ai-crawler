@@ -1,5 +1,5 @@
 .PHONY: help install build up start down stop restart rebuild \
-        logs logs-api logs-worker logs-recorder ps status health \
+        logs logs-api logs-admin logs-worker logs-recorder ps status health \
         db-shell db-migrate db-empty db-reset clean \
         mock-server crawl-mock test docs \
         extension extension-watch
@@ -20,11 +20,12 @@ install: build ## Build all images (Postgres/Neo4j are pulled, app images built 
 build: ## Build the crawler-app / crawl-worker images
 	$(COMPOSE) build
 
-up: ## Start the full stack (Postgres, Neo4j, API, worker) in the background
+up: ## Start the full stack (Postgres, Neo4j, API, admin, worker) in the background
 	$(COMPOSE) up -d
 	@echo ""
 	@echo "API:        http://localhost:3000"
 	@echo "Swagger UI: http://localhost:3000/api-docs"
+	@echo "Admin:      http://localhost:3001/admin"
 	@echo "Neo4j:      http://localhost:7474"
 
 start: up ## Alias for 'up'
@@ -46,6 +47,9 @@ logs: ## Tail logs for all services
 
 logs-api: ## Tail API server logs
 	$(COMPOSE) logs -f crawler-app
+
+logs-admin: ## Tail admin backoffice server logs
+	$(COMPOSE) logs -f admin
 
 logs-worker: ## Tail crawl-worker logs
 	$(COMPOSE) logs -f crawl-worker
