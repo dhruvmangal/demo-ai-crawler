@@ -1,29 +1,24 @@
 import * as THREE from 'three';
 
 /**
- * Ultron-orb-style loading animation: several tilted rings of "neurons" tumbling
- * around a glowing core, with synapse lines that flash between neurons —
- * both within a ring (cheap: inherits the ring's own rotation via the scene
- * graph) and jumping across rings (computed per-frame from world matrices,
- * kept to a small pool since that's the only per-frame CPU work).
+ * Wireframe-globe loading animation: a slowly spinning latitude/longitude
+ * wireframe planet wrapped in a faint atmosphere glow, with glowing surface
+ * nodes and arced "network" links between them that pulse in and out, plus a
+ * couple of satellites tracing tilted orbits around it.
+ *
+ * The nodes and arcs are parented to the globe group so they inherit its spin
+ * for free — the only per-frame work is rotation and opacity pulsing, no
+ * per-frame world-matrix math.
+ *
+ * Public API (used by sidepanel.ts) is unchanged: `new NeuronField(mount)`,
+ * `.start()`, `.stop()`, `.dispose()`.
  */
-
-interface RingSynapseCandidate {
-  ringA: THREE.Group;
-  idxA: number;
-  ringB: THREE.Group;
-  idxB: number;
-}
-
-interface ActiveFire {
-  candidate: RingSynapseCandidate;
-  start: number;
-  duration: number;
-}
 
 const CYAN = new THREE.Color(0x35e2ff);
 const WHITE = new THREE.Color(0xf3fbff);
 const AMBER = new THREE.Color(0xffb454);
+
+const GLOBE_RADIUS = 88;
 
 function makeGlowSprite(): THREE.Texture {
   const size = 64;
@@ -42,36 +37,39 @@ function makeGlowSprite(): THREE.Texture {
   return tex;
 }
 
+interface PulseArc {
+  material: THREE.LineBasicMaterial;
+  phase: number;
+  speed: number;
+}
+
 export class NeuronField {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
   private camera: THREE.PerspectiveCamera;
-  private rings: THREE.Group[] = [];
-  private ringLocalPositions: THREE.Vector3[][] = [];
-  private synapseCandidates: RingSynapseCandidate[] = [];
-  private fires: ActiveFire[] = [];
-  private fireLines: THREE.LineSegments;
-  private core!: THREE.Mesh;
   private root = new THREE.Group();
+  private globe = new THREE.Group();
+  private orbits: THREE.Group[] = [];
+  private arcs: PulseArc[] = [];
+  private atmosphere!: THREE.Mesh;
+  private glowTexture: THREE.Texture;
   private container: HTMLElement;
   private resizeObserver: ResizeObserver;
   private rafId: number | null = null;
   private clock = new THREE.Clock();
-  private readonly maxFires = 28;
 
   constructor(container: HTMLElement) {
     this.container = container;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     this.renderer.setClearColor(0x000000, 0);
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
-    this.camera.position.set(0, 30, 260);
+    this.camera.position.set(0, 24, 300);
     this.camera.lookAt(0, 0, 0);
     this.scene.add(this.root);
 
-    this.buildRings();
-    this.buildCore();
-    this.fireLines = this.buildFireLinePool();
-    this.scene.add(this.fireLines);
+    this.glowTexture = makeGlowSprite();
+    this.buildGlobe();
+    this.buildOrbits();
 
     container.appendChild(this.renderer.domElement);
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -79,162 +77,151 @@ export class NeuronField {
     this.handleResize();
   }
 
-  private buildRings() {
-    const ringConfigs = [
-      { count: 46, radius: 150, tiltX: 0.15, tiltZ: 0.05, speed: 0.09 },
-      { count: 38, radius: 118, tiltX: 1.05, tiltZ: 0.3, speed: -0.14 },
-      { count: 34, radius: 92, tiltX: 0.55, tiltZ: 1.4, speed: 0.2 },
-      { count: 26, radius: 62, tiltX: 1.4, tiltZ: 0.9, speed: -0.27 }
+  /** Evenly-distributed points on the globe surface via a Fibonacci sphere. */
+  private surfacePoints(count: number): THREE.Vector3[] {
+    const pts: THREE.Vector3[] = [];
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    for (let i = 0; i < count; i++) {
+      const y = 1 - (i / (count - 1)) * 2;
+      const r = Math.sqrt(Math.max(0, 1 - y * y));
+      const theta = golden * i;
+      pts.push(
+        new THREE.Vector3(Math.cos(theta) * r, y, Math.sin(theta) * r).multiplyScalar(GLOBE_RADIUS)
+      );
+    }
+    return pts;
+  }
+
+  private buildGlobe() {
+    // Latitude/longitude wireframe shell — the "planet".
+    const wireGeo = new THREE.SphereGeometry(GLOBE_RADIUS, 24, 16);
+    const wireMat = new THREE.MeshBasicMaterial({
+      color: CYAN,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.22,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    this.globe.add(new THREE.Mesh(wireGeo, wireMat));
+
+    // Faint back-side atmosphere shell, gently pulsed in animate().
+    const atmoGeo = new THREE.SphereGeometry(GLOBE_RADIUS * 1.05, 24, 16);
+    const atmoMat = new THREE.MeshBasicMaterial({
+      color: CYAN,
+      transparent: true,
+      opacity: 0.07,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.BackSide
+    });
+    this.atmosphere = new THREE.Mesh(atmoGeo, atmoMat);
+    this.globe.add(this.atmosphere);
+
+    // Glowing surface nodes.
+    const nodes = this.surfacePoints(64);
+    const nodePositions = new Float32Array(nodes.length * 3);
+    nodes.forEach((p, i) => {
+      nodePositions[i * 3] = p.x;
+      nodePositions[i * 3 + 1] = p.y;
+      nodePositions[i * 3 + 2] = p.z;
+    });
+    const nodeGeo = new THREE.BufferGeometry();
+    nodeGeo.setAttribute('position', new THREE.BufferAttribute(nodePositions, 3));
+    const nodeMat = new THREE.PointsMaterial({
+      size: 5,
+      map: this.glowTexture,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      color: CYAN
+    });
+    this.globe.add(new THREE.Points(nodeGeo, nodeMat));
+
+    // Arced network links between random node pairs, lifted off the surface so
+    // they read as great-circle connections rather than chords through the globe.
+    const arcCount = 24;
+    for (let k = 0; k < arcCount; k++) {
+      const a = nodes[Math.floor(Math.random() * nodes.length)];
+      const b = nodes[Math.floor(Math.random() * nodes.length)];
+      if (a === b) continue;
+      const mid = a
+        .clone()
+        .add(b)
+        .multiplyScalar(0.5)
+        .normalize()
+        .multiplyScalar(GLOBE_RADIUS * (1.16 + Math.random() * 0.24));
+      const curve = new THREE.QuadraticBezierCurve3(a.clone(), mid, b.clone());
+      const arcGeo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(24));
+      const arcMat = new THREE.LineBasicMaterial({
+        color: Math.random() < 0.28 ? AMBER : CYAN,
+        transparent: true,
+        opacity: 0.12,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      });
+      this.globe.add(new THREE.Line(arcGeo, arcMat));
+      this.arcs.push({ material: arcMat, phase: Math.random() * Math.PI * 2, speed: 0.8 + Math.random() * 1.6 });
+    }
+
+    this.root.add(this.globe);
+  }
+
+  private buildOrbits() {
+    const configs = [
+      { radius: 132, tiltX: 1.2, tiltZ: 0.2, speed: 0.35, sats: 2, color: WHITE },
+      { radius: 158, tiltX: 0.4, tiltZ: 1.1, speed: -0.24, sats: 1, color: AMBER }
     ];
 
-    const sprite = makeGlowSprite();
-
-    for (const cfg of ringConfigs) {
+    for (const cfg of configs) {
       const group = new THREE.Group();
       group.rotation.x = cfg.tiltX;
       group.rotation.z = cfg.tiltZ;
       (group as any).userData.speed = cfg.speed;
 
-      const positions = new Float32Array(cfg.count * 3);
-      const localPositions: THREE.Vector3[] = [];
-      for (let i = 0; i < cfg.count; i++) {
-        const angle = (i / cfg.count) * Math.PI * 2;
-        const jitter = (Math.random() - 0.5) * cfg.radius * 0.06;
-        const x = Math.cos(angle) * (cfg.radius + jitter);
-        const y = Math.sin(angle) * (cfg.radius + jitter);
-        const z = (Math.random() - 0.5) * cfg.radius * 0.08;
-        positions[i * 3] = x;
-        positions[i * 3 + 1] = y;
-        positions[i * 3 + 2] = z;
-        localPositions.push(new THREE.Vector3(x, y, z));
+      // Faint orbit ring.
+      const segs = 96;
+      const ringPos = new Float32Array((segs + 1) * 3);
+      for (let i = 0; i <= segs; i++) {
+        const ang = (i / segs) * Math.PI * 2;
+        ringPos[i * 3] = Math.cos(ang) * cfg.radius;
+        ringPos[i * 3 + 1] = Math.sin(ang) * cfg.radius;
+        ringPos[i * 3 + 2] = 0;
       }
+      const ringGeo = new THREE.BufferGeometry();
+      ringGeo.setAttribute('position', new THREE.BufferAttribute(ringPos, 3));
+      const ringMat = new THREE.LineBasicMaterial({
+        color: CYAN,
+        transparent: true,
+        opacity: 0.1,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      });
+      group.add(new THREE.Line(ringGeo, ringMat));
 
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      const material = new THREE.PointsMaterial({
-        size: 5.5,
-        map: sprite,
+      // Satellite glow nodes riding the ring.
+      const satPos = new Float32Array(cfg.sats * 3);
+      for (let i = 0; i < cfg.sats; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        satPos[i * 3] = Math.cos(ang) * cfg.radius;
+        satPos[i * 3 + 1] = Math.sin(ang) * cfg.radius;
+        satPos[i * 3 + 2] = 0;
+      }
+      const satGeo = new THREE.BufferGeometry();
+      satGeo.setAttribute('position', new THREE.BufferAttribute(satPos, 3));
+      const satMat = new THREE.PointsMaterial({
+        size: 7.5,
+        map: this.glowTexture,
         transparent: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
-        color: CYAN
+        color: cfg.color
       });
-      const points = new THREE.Points(geometry, material);
-      group.add(points);
-
-      // Faint static ring-neighbor connections — inherit the ring's rotation for free.
-      const lineSegs: number[] = [];
-      for (let i = 0; i < cfg.count; i++) {
-        const a = localPositions[i];
-        const b = localPositions[(i + 1) % cfg.count];
-        lineSegs.push(a.x, a.y, a.z, b.x, b.y, b.z);
-      }
-      const lineGeo = new THREE.BufferGeometry();
-      lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(lineSegs), 3));
-      const lineMat = new THREE.LineBasicMaterial({
-        color: CYAN,
-        transparent: true,
-        opacity: 0.12,
-        blending: THREE.AdditiveBlending
-      });
-      group.add(new THREE.LineSegments(lineGeo, lineMat));
+      group.add(new THREE.Points(satGeo, satMat));
 
       this.root.add(group);
-      this.rings.push(group);
-      this.ringLocalPositions.push(localPositions);
+      this.orbits.push(group);
     }
-
-    // Precompute candidate cross-ring synapse pairs for the flashing effect.
-    for (let r = 0; r < this.rings.length - 1; r++) {
-      const a = this.ringLocalPositions[r];
-      const b = this.ringLocalPositions[r + 1];
-      for (let i = 0; i < 14; i++) {
-        this.synapseCandidates.push({
-          ringA: this.rings[r],
-          idxA: Math.floor(Math.random() * a.length),
-          ringB: this.rings[r + 1],
-          idxB: Math.floor(Math.random() * b.length)
-        });
-      }
-    }
-  }
-
-  private buildCore() {
-    const geometry = new THREE.IcosahedronGeometry(20, 1);
-    const material = new THREE.MeshBasicMaterial({
-      color: WHITE,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.85
-    });
-    this.core = new THREE.Mesh(geometry, material);
-    this.root.add(this.core);
-
-    const glowGeo = new THREE.IcosahedronGeometry(14, 1);
-    const glowMat = new THREE.MeshBasicMaterial({
-      color: CYAN,
-      transparent: true,
-      opacity: 0.35,
-      blending: THREE.AdditiveBlending
-    });
-    this.root.add(new THREE.Mesh(glowGeo, glowMat));
-  }
-
-  private buildFireLinePool(): THREE.LineSegments {
-    const positions = new Float32Array(this.maxFires * 2 * 3);
-    const colors = new Float32Array(this.maxFires * 2 * 3);
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geometry.setDrawRange(0, 0);
-    const material = new THREE.LineBasicMaterial({
-      vertexColors: true,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false
-    });
-    return new THREE.LineSegments(geometry, material);
-  }
-
-  private maybeSpawnFire(now: number) {
-    if (this.fires.length >= this.maxFires) return;
-    if (Math.random() > 0.55) return;
-    const candidate = this.synapseCandidates[Math.floor(Math.random() * this.synapseCandidates.length)];
-    this.fires.push({ candidate, start: now, duration: 380 + Math.random() * 420 });
-  }
-
-  private updateFireLines(now: number) {
-    this.fires = this.fires.filter((f) => now - f.start < f.duration);
-    this.maybeSpawnFire(now);
-
-    const posAttr = this.fireLines.geometry.getAttribute('position') as THREE.BufferAttribute;
-    const colorAttr = this.fireLines.geometry.getAttribute('color') as THREE.BufferAttribute;
-    const tmpA = new THREE.Vector3();
-    const tmpB = new THREE.Vector3();
-    const flash = new THREE.Color();
-
-    this.fires.forEach((fire, i) => {
-      const { ringA, idxA, ringB, idxB } = fire.candidate;
-      tmpA.copy(this.ringLocalPositions[this.rings.indexOf(ringA)][idxA]);
-      tmpB.copy(this.ringLocalPositions[this.rings.indexOf(ringB)][idxB]);
-      ringA.localToWorld(tmpA);
-      ringB.localToWorld(tmpB);
-      this.root.worldToLocal(tmpA);
-      this.root.worldToLocal(tmpB);
-
-      const t = (now - fire.start) / fire.duration;
-      const brightness = Math.sin(Math.min(t, 1) * Math.PI); // ease in/out flash
-      flash.copy(t < 0.5 ? WHITE : CYAN).lerp(AMBER, 0.15).multiplyScalar(brightness);
-
-      posAttr.setXYZ(i * 2, tmpA.x, tmpA.y, tmpA.z);
-      posAttr.setXYZ(i * 2 + 1, tmpB.x, tmpB.y, tmpB.z);
-      colorAttr.setXYZ(i * 2, flash.r, flash.g, flash.b);
-      colorAttr.setXYZ(i * 2 + 1, flash.r, flash.g, flash.b);
-    });
-
-    this.fireLines.geometry.setDrawRange(0, this.fires.length * 2);
-    posAttr.needsUpdate = true;
-    colorAttr.needsUpdate = true;
   }
 
   private handleResize() {
@@ -251,16 +238,21 @@ export class NeuronField {
     const delta = this.clock.getDelta();
     const elapsed = this.clock.getElapsedTime();
 
-    for (const ring of this.rings) {
-      ring.rotation.z += (ring as any).userData.speed * delta;
-    }
-    this.root.rotation.y += delta * 0.06;
-    this.core.rotation.y += delta * 0.4;
-    this.core.rotation.x += delta * 0.15;
-    const pulse = 1 + Math.sin(elapsed * 2.4) * 0.06;
-    this.core.scale.setScalar(pulse);
+    this.globe.rotation.y += delta * 0.18;
+    this.root.rotation.x = Math.sin(elapsed * 0.15) * 0.08; // gentle bob
 
-    this.updateFireLines(performance.now());
+    for (const orbit of this.orbits) {
+      orbit.rotation.z += (orbit as any).userData.speed * delta;
+    }
+
+    const pulse = 1 + Math.sin(elapsed * 1.6) * 0.03;
+    this.atmosphere.scale.setScalar(pulse);
+
+    for (const arc of this.arcs) {
+      const v = Math.sin(elapsed * arc.speed + arc.phase);
+      arc.material.opacity = 0.08 + Math.max(0, v) * 0.5;
+    }
+
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -287,6 +279,7 @@ export class NeuronField {
       if (Array.isArray(material)) material.forEach((m) => m.dispose());
       else if (material) (material as THREE.Material).dispose();
     });
+    this.glowTexture.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
