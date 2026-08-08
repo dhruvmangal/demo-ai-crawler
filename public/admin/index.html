@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Narreto · Admin Backoffice</title>
+    <link rel="stylesheet" href="admin.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-glyph">◉</span>
+        <div>
+          <h1>NARRETO ADMIN</h1>
+          <p class="brand-sub">crawl requests · knowledge graphs · recordings</p>
+        </div>
+      </div>
+      <div class="totals" id="totals"></div>
+      <label class="auto-refresh">
+        <input type="checkbox" id="auto-refresh" checked />
+        auto-refresh 5s
+      </label>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-controls">
+          <input type="search" id="filter" placeholder="filter by URL, status, id…" autocomplete="off" />
+        </div>
+        <div class="request-list" id="request-list"></div>
+      </aside>
+
+      <section class="detail" id="detail">
+        <p class="empty-state">Select a crawl request to inspect it.</p>
+      </section>
+    </main>
+
+    <template id="tpl-detail">
+      <div class="detail-head">
+        <div>
+          <h2 class="detail-title"></h2>
+          <p class="detail-meta"></p>
+        </div>
+        <span class="chip detail-status"></span>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button type="button" class="tab" data-tab="overview" role="tab">Overview</button>
+        <button type="button" class="tab" data-tab="graph" role="tab">Knowledge graph</button>
+        <button type="button" class="tab" data-tab="recordings" role="tab">Workflows &amp; videos</button>
+        <button type="button" class="tab" data-tab="pages" role="tab">Pages</button>
+      </nav>
+      <div class="tab-panels">
+        <div class="tab-panel" data-panel="overview"></div>
+        <div class="tab-panel" data-panel="graph"></div>
+        <div class="tab-panel" data-panel="recordings"></div>
+        <div class="tab-panel" data-panel="pages"></div>
+      </div>
+    </template>
+
+    <script src="admin.js"></script>
+  </body>
+</html>

@@ -145,6 +145,31 @@ type and entity name) — no extra LLM calls at recording time.
 docker compose logs -f workflow-agent-worker
 ```
 
+### Admin backoffice
+
+A dashboard over everything the service has produced lives at:
+
+```
+http://localhost:3000/admin
+```
+
+It lists every crawl request (`crawl_jobs`) newest-first with live status, and
+for the selected one shows four tabs: **Overview** (job timings, extracted
+counts, entities/actions, relationships, domain summary), **Knowledge graph**
+(the Neo4j projection rendered as an interactive force-directed graph — drag to
+pan, scroll to zoom, click a node to inspect its properties and edges, toggle
+node types in the legend), **Workflows & videos** (each inferred workflow, its
+steps, a *Record video* button, and every run's `.webm` with its `.vtt`
+narration track inline), and **Pages** (the discovered page table with AI
+descriptions).
+
+It polls every 5 seconds, so a crawl or recording can be watched from `PENDING`
+through to a playable video. It is served by `crawler-app` from `public/admin/`
+and reads `/api/admin/*`, `/api/graph/*` and `/recordings/*` — all read-only
+except the *Record video* button, which posts to the existing
+`/api/workflows/:id/run`. **There is no authentication**: it exposes every
+crawl's data, so keep port 3000 off the public internet.
+
 ### Demo without a real target site
 
 A mock CRM app (dashboard/customers/orders/settings, with modals and
@@ -208,7 +233,9 @@ Set via environment variables (see `docker-compose.yml`):
 
 ```
 src/
-  api/            Express app, routes, OpenAPI spec
+  agent/          LLM orchestrator + Playwright tool surface used when replaying
+                  a workflow for recording
+  api/            Express app, routes (incl. admin-routes.ts), OpenAPI spec
   config/         Postgres pool + Neo4j driver setup
   crawler/        Playwright-driven crawl loop
   discovery/      Page metadata, navigation links, UI element discovery
@@ -219,6 +246,8 @@ src/
   safety/         Blocks risky interactions (e.g. destructive button clicks)
   workers/        Background job processors (crawl, demo planning)
   types/          Shared TypeScript types
+public/
+  admin/          Admin backoffice page (static, served at /admin)
 init.sql          Postgres schema
 docker-compose.yml
 Dockerfile
@@ -239,13 +268,16 @@ It's a browser UI, not a server, so it doesn't run as a long-lived container.
 + Three.js, via esbuild) into `extension/dist` and exits:
 
 ```bash
-docker compose up -d --build extension-builder
+make extension          # or: docker compose build extension-builder && docker compose run --rm extension-builder
+make extension-watch    # same, but rebuilds on every change to extension/src
 ```
 
 Then load it in Chrome: `chrome://extensions` → enable *Developer mode* →
 *Load unpacked* → select `extension/dist`. Requires `crawler-app` running at
-`http://localhost:3000` (declared in `host_permissions`). Rebuild the same way
-after editing `extension/src/*`.
+`http://localhost:3000` (declared in `host_permissions`). Re-run `make
+extension` after editing `extension/src/*` — the builder image copies the source
+in at image-build time, so the image has to be rebuilt, which `make extension`
+does for you.
 
 ## Teardown
 
