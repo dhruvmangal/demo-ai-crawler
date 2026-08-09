@@ -400,6 +400,304 @@ function renderPages(panel, detail) {
   );
 }
 
+/* ------------------------------------------------------------ video player */
+
+function svgIcon(paths) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.innerHTML = paths;
+  return svg;
+}
+
+const PLAYER_ICONS = {
+  play: '<polygon points="7,4 20,12 7,20" fill="currentColor"/>',
+  pause: '<rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/>',
+  replay: '<path fill="currentColor" d="M12 5V1L6.5 6.5 12 12V8a4 4 0 1 1-4 4H6a6 6 0 1 0 6-6z"/>',
+  back: '<path fill="currentColor" d="M11 5V1L5.5 6.5 11 12V8a4 4 0 1 1-4 4H5a6 6 0 1 0 6-6z"/>',
+  fwd: '<path fill="currentColor" d="M13 5V1l5.5 5.5L13 12V8a4 4 0 1 0 4 4h2a6 6 0 1 1-6-6z"/>',
+  volume: '<path fill="currentColor" d="M4 9v6h4l5 5V4L8 9H4z"/><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
+  muted: '<path fill="currentColor" d="M4 9v6h4l5 5V4L8 9H4z"/><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M16 9l4.5 6M20.5 9L16 15"/>',
+  expand: '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>',
+  collapse: '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 4v5H4M15 4v5h5M15 20v-5h5M9 20v-5H4"/>',
+};
+
+const PLAYER_ASPECT_MODES = [
+  { key: 'contain', label: 'FIT' },
+  { key: 'cover', label: 'FILL' },
+  { key: 'fill', label: 'STRETCH' },
+];
+
+function formatPlayerTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
+  const ss = String(s).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function createVideoPlayer({ src, captionsSrc }) {
+  const player = el('div', 'player');
+  player.tabIndex = 0;
+
+  const media = el('div', 'player-media');
+  const video = document.createElement('video');
+  video.preload = 'metadata';
+  video.src = src;
+  video.style.objectFit = PLAYER_ASPECT_MODES[0].key;
+  media.appendChild(video);
+
+  let track = null;
+  if (captionsSrc) {
+    track = document.createElement('track');
+    track.kind = 'captions';
+    track.label = 'Narration';
+    track.srclang = 'en';
+    track.src = captionsSrc;
+    video.appendChild(track);
+    track.track.mode = 'disabled';
+  }
+
+  const bigButton = el('button', 'player-bigplay');
+  bigButton.type = 'button';
+  bigButton.appendChild(svgIcon(PLAYER_ICONS.play));
+  media.appendChild(bigButton);
+  player.appendChild(media);
+
+  const controls = el('div', 'player-controls');
+
+  const progress = el('div', 'player-progress');
+  const buffered = el('div', 'player-progress-buffered');
+  const played = el('div', 'player-progress-played');
+  const seek = document.createElement('input');
+  seek.type = 'range';
+  seek.className = 'player-seek';
+  seek.min = '0';
+  seek.max = '1000';
+  seek.value = '0';
+  progress.append(buffered, played, seek);
+  controls.appendChild(progress);
+
+  const row = el('div', 'player-row');
+
+  const playBtn = el('button', 'player-btn');
+  playBtn.type = 'button';
+  playBtn.appendChild(svgIcon(PLAYER_ICONS.play));
+
+  const backBtn = el('button', 'player-btn player-skip');
+  backBtn.type = 'button';
+  backBtn.appendChild(svgIcon(PLAYER_ICONS.back));
+  backBtn.appendChild(el('span', 'player-skip-label', '10'));
+
+  const fwdBtn = el('button', 'player-btn player-skip');
+  fwdBtn.type = 'button';
+  fwdBtn.appendChild(svgIcon(PLAYER_ICONS.fwd));
+  fwdBtn.appendChild(el('span', 'player-skip-label', '10'));
+
+  const volumeWrap = el('div', 'player-volume');
+  const muteBtn = el('button', 'player-btn');
+  muteBtn.type = 'button';
+  muteBtn.appendChild(svgIcon(PLAYER_ICONS.volume));
+  const volumeRange = document.createElement('input');
+  volumeRange.type = 'range';
+  volumeRange.className = 'player-volume-range';
+  volumeRange.min = '0';
+  volumeRange.max = '1';
+  volumeRange.step = '0.01';
+  volumeRange.value = '1';
+  volumeWrap.append(muteBtn, volumeRange);
+
+  const time = el('span', 'player-time', '0:00 / 0:00');
+  const spacer = el('div', 'player-spacer');
+
+  const ccBtn = el('button', 'player-btn player-pill', 'CC');
+  ccBtn.type = 'button';
+  if (!track) ccBtn.disabled = true;
+
+  const aspectBtn = el('button', 'player-btn player-pill', PLAYER_ASPECT_MODES[0].label);
+  aspectBtn.type = 'button';
+
+  const fsBtn = el('button', 'player-btn');
+  fsBtn.type = 'button';
+  fsBtn.appendChild(svgIcon(PLAYER_ICONS.expand));
+
+  row.append(playBtn, backBtn, fwdBtn, volumeWrap, time, spacer, ccBtn, aspectBtn, fsBtn);
+  controls.appendChild(row);
+  player.appendChild(controls);
+
+  function setPlayIcon(isPlaying) {
+    playBtn.replaceChildren(svgIcon(isPlaying ? PLAYER_ICONS.pause : PLAYER_ICONS.play));
+    bigButton.replaceChildren(svgIcon(video.ended ? PLAYER_ICONS.replay : isPlaying ? PLAYER_ICONS.pause : PLAYER_ICONS.play));
+  }
+
+  function togglePlay() {
+    if (video.paused || video.ended) video.play().catch(() => {});
+    else video.pause();
+  }
+
+  media.addEventListener('click', togglePlay);
+  playBtn.addEventListener('click', togglePlay);
+
+  video.addEventListener('play', () => {
+    setPlayIcon(true);
+    player.classList.add('is-playing');
+    scheduleIdle();
+  });
+  video.addEventListener('pause', () => {
+    setPlayIcon(false);
+    player.classList.remove('is-playing');
+    showControls();
+  });
+  video.addEventListener('ended', () => {
+    setPlayIcon(false);
+    player.classList.remove('is-playing');
+    showControls();
+  });
+
+  backBtn.addEventListener('click', () => {
+    video.currentTime = Math.max(0, video.currentTime - 10);
+  });
+  fwdBtn.addEventListener('click', () => {
+    video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
+  });
+
+  let lastVolume = 1;
+  function updateVolumeIcon() {
+    muteBtn.replaceChildren(svgIcon(video.muted || video.volume === 0 ? PLAYER_ICONS.muted : PLAYER_ICONS.volume));
+  }
+  muteBtn.addEventListener('click', () => {
+    video.muted = !video.muted;
+    if (!video.muted && video.volume === 0) video.volume = lastVolume || 1;
+    volumeRange.value = video.muted ? '0' : String(video.volume);
+    updateVolumeIcon();
+  });
+  volumeRange.addEventListener('input', () => {
+    const v = Number(volumeRange.value);
+    video.volume = v;
+    video.muted = v === 0;
+    if (v > 0) lastVolume = v;
+    updateVolumeIcon();
+  });
+
+  let seeking = false;
+  seek.addEventListener('pointerdown', () => { seeking = true; });
+  seek.addEventListener('input', () => {
+    if (!Number.isFinite(video.duration)) return;
+    played.style.width = `${Number(seek.value) / 10}%`;
+    video.currentTime = (Number(seek.value) / 1000) * video.duration;
+  });
+  seek.addEventListener('change', () => { seeking = false; });
+
+  video.addEventListener('timeupdate', () => {
+    if (!seeking && Number.isFinite(video.duration) && video.duration > 0) {
+      const pct = (video.currentTime / video.duration) * 1000;
+      seek.value = String(pct);
+      played.style.width = `${pct / 10}%`;
+    }
+    time.textContent = `${formatPlayerTime(video.currentTime)} / ${formatPlayerTime(video.duration)}`;
+  });
+
+  video.addEventListener('progress', () => {
+    if (!video.buffered.length || !Number.isFinite(video.duration) || video.duration === 0) return;
+    const end = video.buffered.end(video.buffered.length - 1);
+    buffered.style.width = `${Math.min(100, (end / video.duration) * 100)}%`;
+  });
+
+  video.addEventListener('loadedmetadata', () => {
+    time.textContent = `${formatPlayerTime(video.currentTime)} / ${formatPlayerTime(video.duration)}`;
+  });
+
+  video.addEventListener('error', () => {
+    player.replaceChildren(el('div', 'error-box', 'This recording could not be loaded.'));
+  });
+
+  if (track) {
+    ccBtn.addEventListener('click', () => {
+      const showing = track.track.mode === 'showing';
+      track.track.mode = showing ? 'disabled' : 'showing';
+      ccBtn.classList.toggle('active', !showing);
+    });
+  }
+
+  let aspectIndex = 0;
+  aspectBtn.addEventListener('click', () => {
+    aspectIndex = (aspectIndex + 1) % PLAYER_ASPECT_MODES.length;
+    const mode = PLAYER_ASPECT_MODES[aspectIndex];
+    video.style.objectFit = mode.key;
+    aspectBtn.textContent = mode.label;
+  });
+
+  fsBtn.addEventListener('click', () => {
+    if (document.fullscreenElement === player) document.exitFullscreen();
+    else player.requestFullscreen().catch(() => {});
+  });
+  player.addEventListener('fullscreenchange', () => {
+    const isFs = document.fullscreenElement === player;
+    fsBtn.replaceChildren(svgIcon(isFs ? PLAYER_ICONS.collapse : PLAYER_ICONS.expand));
+    player.classList.toggle('is-fullscreen', isFs);
+  });
+
+  let idleTimer = null;
+  function showControls() {
+    player.classList.remove('idle');
+    if (idleTimer) clearTimeout(idleTimer);
+    if (!video.paused && !video.ended) scheduleIdle();
+  }
+  function scheduleIdle() {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => player.classList.add('idle'), 2200);
+  }
+  player.addEventListener('mousemove', showControls);
+  player.addEventListener('mouseleave', () => {
+    if (!video.paused) player.classList.add('idle');
+  });
+
+  player.addEventListener('keydown', (event) => {
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' ', 'k', 'm', 'f', 'c'].includes(event.key)) {
+      event.preventDefault();
+    }
+    showControls();
+    switch (event.key) {
+      case ' ':
+      case 'k':
+        togglePlay();
+        break;
+      case 'ArrowLeft':
+        video.currentTime = Math.max(0, video.currentTime - 5);
+        break;
+      case 'ArrowRight':
+        video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 5);
+        break;
+      case 'ArrowUp':
+        video.volume = Math.min(1, video.volume + 0.05);
+        volumeRange.value = String(video.volume);
+        updateVolumeIcon();
+        break;
+      case 'ArrowDown':
+        video.volume = Math.max(0, video.volume - 0.05);
+        volumeRange.value = String(video.volume);
+        updateVolumeIcon();
+        break;
+      case 'm':
+        muteBtn.click();
+        break;
+      case 'f':
+        fsBtn.click();
+        break;
+      case 'c':
+        if (track) ccBtn.click();
+        break;
+      default:
+        break;
+    }
+  });
+
+  updateVolumeIcon();
+  return player;
+}
+
 /* ------------------------------------------------------- workflows & videos */
 
 async function queueRun(workflowId, button) {
@@ -429,20 +727,10 @@ function runCard(run) {
   box.appendChild(head);
 
   if (run.status === 'COMPLETED' && run.video_path) {
-    const video = el('video');
-    video.controls = true;
-    video.preload = 'metadata';
-    video.src = `/recordings/${run.video_path}`;
-    if (run.captions_path) {
-      const track = document.createElement('track');
-      track.kind = 'captions';
-      track.label = 'Narration';
-      track.srclang = 'en';
-      track.default = true;
-      track.src = `/recordings/${run.captions_path}`;
-      video.appendChild(track);
-    }
-    box.appendChild(video);
+    box.appendChild(createVideoPlayer({
+      src: `/recordings/${run.video_path}`,
+      captionsSrc: run.captions_path ? `/recordings/${run.captions_path}` : null,
+    }));
 
     const links = el('div', 'run-links');
     const videoLink = el('a', null, 'video');
@@ -982,13 +1270,17 @@ async function refresh() {
   }
 }
 
-els.filter.addEventListener('input', () => {
-  state.filter = els.filter.value;
-  renderList();
-});
+// Guarded: admin.js is also loaded standalone (no admin index.html around it) by pages
+// that just want createVideoPlayer(), e.g. the demo-caption-viewer recordings pages.
+if (els.filter) {
+  els.filter.addEventListener('input', () => {
+    state.filter = els.filter.value;
+    renderList();
+  });
 
-setInterval(() => {
-  if (els.autoRefresh.checked && !document.hidden) refresh();
-}, POLL_MS);
+  setInterval(() => {
+    if (els.autoRefresh.checked && !document.hidden) refresh();
+  }, POLL_MS);
 
-refresh();
+  refresh();
+}

@@ -3,12 +3,25 @@ import { query } from '../config/database';
 import { v4 as uuidv4 } from 'uuid';
 import { graphRouter } from './graph-routes';
 import { workflowRunRouter } from './workflow-run-routes';
+import { authRouter } from './auth-routes';
 
 export const router = Router();
 
+// How long a completed crawl for a given target URL is considered fresh. A new
+// POST /api/crawl for the same URL within this window reuses that result instead of
+// re-crawling (re-navigating every page, re-running AI summarization/extraction).
+const CRAWL_TTL_HOURS = Math.max(0, Number(process.env.CRAWL_TTL_HOURS) || 24);
+
+/**
+ * Authentication and User Tracking routes (Google, GitHub, and Demo logins/signups)
+ */
+router.use('/auth', authRouter);
+
 /**
  * POST /api/crawl
- * Triggers a website discovery crawl.
+ * Triggers a website discovery crawl. If this exact target URL was already crawled
+ * to completion within CRAWL_TTL_HOURS, returns that existing job/project instead of
+ * queuing a new crawl.
  */
 router.post('/crawl', async (req: Request, res: Response) => {
   const { targetUrl, projectId } = req.body;
@@ -17,9 +30,29 @@ router.post('/crawl', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'targetUrl is required' });
   }
 
-  const projId = projectId || uuidv4();
-
   try {
+    if (CRAWL_TTL_HOURS > 0) {
+      const recentRes = await query(
+        `SELECT id, project_id, target_url, status, created_at, completed_at
+         FROM crawl_jobs
+         WHERE target_url = $1
+           AND status = 'COMPLETED'
+           AND completed_at > NOW() - make_interval(hours => $2::int)
+         ORDER BY completed_at DESC
+         LIMIT 1`,
+        [targetUrl, CRAWL_TTL_HOURS]
+      );
+
+      if ((recentRes.rowCount ?? 0) > 0) {
+        return res.status(200).json({
+          message: `Reusing crawl completed within the last ${CRAWL_TTL_HOURS}h; not re-crawling.`,
+          cached: true,
+          job: recentRes.rows[0]
+        });
+      }
+    }
+
+    const projId = projectId || uuidv4();
     const jobRes = await query(
       `INSERT INTO crawl_jobs (project_id, target_url, status)
        VALUES ($1, $2, 'PENDING')
@@ -29,6 +62,7 @@ router.post('/crawl', async (req: Request, res: Response) => {
 
     return res.status(201).json({
       message: 'Crawl job queued successfully',
+      cached: false,
       job: jobRes.rows[0]
     });
   } catch (err: any) {

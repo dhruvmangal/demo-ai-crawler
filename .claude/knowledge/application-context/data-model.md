@@ -9,9 +9,12 @@ let `POST /api/crawl` mint one.
 
 ### `crawl_jobs`
 One row per queued/running/finished crawl. `status`: `PENDING` → `RUNNING`
-→ (`AWAITING_CREDENTIALS` ⇄ `RUNNING`) → `COMPLETED` | `FAILED`.
-`login_url` is set only while `AWAITING_CREDENTIALS`. `error_message` set
-on `FAILED`.
+→ (`AWAITING_CREDENTIALS` ⇄ `RUNNING`) → `ENRICHING` → `COMPLETED` | `FAILED`.
+`ENRICHING` means the headless-browser crawl is done and AI summarization/
+knowledge extraction/graph projection are running in the background
+(`ENRICH_CONCURRENCY`-bounded, off the worker's polling loop, so it never
+blocks the next job's crawl from starting). `login_url` is set only while
+`AWAITING_CREDENTIALS`. `error_message` set on `FAILED`.
 
 ### `crawl_credentials`
 Transient holding table. A row exists only between the caller POSTing
@@ -77,18 +80,23 @@ Job queue row for the recording agent. `status`: `PENDING` → `RUNNING` →
 relative to the shared `recordings` volume**, not full paths — served by
 `crawler-app` at `/recordings/<filename>`.
 
+### `users`
+Stores user accounts authenticated via Google OAuth, GitHub OAuth, or local demo.
+Columns: `id` (UUID PK), `email` (VARCHAR UNIQUE), `name` (VARCHAR), `avatar_url` (TEXT), `provider` (`google` | `github` | `demo`), `provider_user_id` (TEXT), `role` (VARCHAR default `'user'`), `last_login_at` (TIMESTAMPTZ), `created_at`, `updated_at`.
+
+### `user_auth_logs`
+Audit trail recording every authentication lifecycle event: `SIGNUP`, `LOGIN`, `LOGOUT`, `TOKEN_REFRESH`.
+Columns: `id` (UUID PK), `user_id` (UUID FK `ON DELETE CASCADE`), `event_type` (VARCHAR), `provider` (VARCHAR), `ip_address` (VARCHAR), `user_agent` (TEXT), `metadata` (JSONB), `created_at` (TIMESTAMPTZ).
+Indexed on `email`, `provider`, `user_id`, `created_at DESC`, `event_type`.
+
 ## Delete/rebuild semantics worth knowing
 
-`KnowledgeBuilder.build()` does a **hard delete-and-rebuild** per project
-on every crawl, not an incremental merge:
-- `DELETE FROM pages WHERE project_id = $1` (cascades to `ui_elements`,
-  `page_snapshots`) before re-inserting the freshly crawled set.
+`KnowledgeBuilder.build()` uses a cached lookup before deletion to preserve AI summaries across re-crawls when `dom_hash` is unchanged:
+- Existing `ai_summary` / `ai_description` keyed by `dom_hash` are read into memory.
+- `DELETE FROM pages WHERE project_id = $1` cleans previous rows.
+- Re-inserted pages with identical `dom_hash` reuse previous summaries without calling the LLM.
 - `DELETE FROM entities WHERE project_id = $1` and
   `DELETE FROM workflows WHERE project_id = $1` before re-inserting AI
-  output (entities also cascade-delete `actions`/`relationships`;
+  output (entities cascade-delete `actions`/`relationships`;
   workflows cascade-delete `workflow_steps`).
-
-So re-crawling a project fully replaces its pages/entities/workflows —
-there's no history retained across crawls except whatever's still in
-`page_snapshots`, which becomes orphaned (and cascade-deleted) once its
-parent `pages` row is replaced.
+- `users` and `user_auth_logs` are preserved across crawls.

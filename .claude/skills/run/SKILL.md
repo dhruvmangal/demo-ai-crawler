@@ -54,6 +54,15 @@ Poll job status, then fetch results once `status` is `COMPLETED`:
 curl http://localhost:3000/api/crawl/<job-id>
 curl http://localhost:3000/api/summary/<project-id>
 curl http://localhost:3000/api/graph/<project-id>
+curl http://localhost:3000/api/auth/users
+curl http://localhost:3000/api/auth/stats
+```
+
+## Database migrations and seeders
+
+```bash
+docker exec crawler_app npm run db:migrate
+docker exec crawler_app npm run db:seed
 ```
 
 ## Demo without a real target site

@@ -32,10 +32,10 @@ async function runTest() {
     console.log(`Discovered ${rawPages.length} pages.`);
 
     // 3. Build relational and Neo4j knowledge
-    await KnowledgeBuilder.build(projectId, rawPages);
+    const builtKnowledge = await KnowledgeBuilder.build(projectId, rawPages);
 
     // 4. Summarize knowledge domain
-    const summary = await KnowledgeSummarizer.summarize(projectId);
+    const summary = await KnowledgeSummarizer.summarize(projectId, builtKnowledge);
     console.log('\n--- KNOWLEDGE SUMMARY RESULT ---');
     console.log(JSON.stringify(summary, null, 2));
 

@@ -8,6 +8,12 @@ import { UiDiscovery } from '../discovery/ui-discovery';
  * direct Claude tool definitions against a real Playwright Page rather than a
  * separate MCP server process. Swapping in the real @playwright/mcp package later
  * (e.g. to share it with other MCP clients) is a drop-in replacement for this file.
+ *
+ * Used by ScriptHealer (src/agent/script-healer.ts), the one remaining live-page,
+ * LLM-driven phase -- generation itself is handled by DeterministicScriptEngine, which
+ * needs no browser or LLM. ScriptHealer defines its own locally-scoped "finish" tool
+ * (finish_heal) with a shape specific to what it produces, rather than a shared generic
+ * one.
  */
 export const BROWSER_TOOLS: Anthropic.Tool[] = [
   {
@@ -73,17 +79,6 @@ export const BROWSER_TOOLS: Anthropic.Tool[] = [
         milliseconds: { type: 'number', description: 'How long to wait, in milliseconds.' }
       },
       required: ['milliseconds']
-    }
-  },
-  {
-    name: 'finish',
-    description: 'Call this when this step is complete (or when you determine no action is needed, e.g. just viewing a page). Provide a short, one-sentence, present-tense narration of what happened, suitable as a video caption.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        narration: { type: 'string', description: 'One-sentence narration of what this step did, e.g. "Opens the customer creation form."' }
-      },
-      required: ['narration']
     }
   }
 ];

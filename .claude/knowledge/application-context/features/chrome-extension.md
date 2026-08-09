@@ -42,15 +42,18 @@ hosted deployment without editing the manifest.
   build the actual DOM (using `textContent`, never `innerHTML`, for any
   crawled-site-derived or LLM-derived string — page titles/URLs and
   workflow names are untrusted input from whatever site was crawled).
+- **`auth.ts`** — authentication service managing Google OAuth 2.0 and GitHub OAuth via `chrome.identity.launchWebAuthFlow`, session persistence in `chrome.storage.local`, instant demo sandbox profile mode, and automatic profile sync to `POST /api/auth/sync`.
 - **`neuronField.ts`** — a Three.js particle/ring animation shown during
   active scanning/recording; purely decorative, no data dependency.
-- **`sidepanel.ts`** — the state machine and all wiring; see below.
+- **`sidepanel.ts`** — the state machine, user auth header bar, and all wiring; see below.
 
 ## UI state machine (`sidepanel.ts`)
 
 Views: `idle → scanning → results ⇄ recording → recording-results`, plus
-an `error` view reachable from `scanning` or `recording`.
+`auth` (Google/GitHub authentication modal) and `error` views.
 
+- **User Bar (`hud-user-bar`)**: Always visible at top of the HUD. Shows user avatar, display name, provider badge (`GOOGLE` / `GITHUB`), and an `ACCOUNT` / `SIGN IN` button.
+- **auth**: Dedicated authentication matrix view with "CONTINUE WITH GOOGLE" and "CONTINUE WITH GITHUB" buttons, user profile details, and session sign-out.
 - **idle**: URL input pre-filled from the active tab's URL
   (`getActiveTabUrl()`, restricted to `http(s)://`). "INITIATE SCAN" →
   `startCrawl()` + begins polling.

@@ -77,11 +77,15 @@ db-migrate: ## Create/verify schema from init.sql (idempotent -- safe to re-run 
 	docker exec -i crawler_postgres psql -U crawler_user -d crawler_db < init.sql
 	@echo "Schema created/verified from init.sql."
 
+db-seed: ## Seed the database with demo users (Google & GitHub) and auth logs
+	docker exec crawler_app npm run db:seed
+	@echo "Database seeded with users and auth audit logs."
+
 db-empty: ## Delete all rows from every table, but keep the schema (asks for confirmation)
 	@read -p "This deletes ALL data from every table but keeps the schema. Continue? [y/N] " ans; \
 	if [ "$$ans" = "y" ] || [ "$$ans" = "Y" ]; then \
 		docker exec -i crawler_postgres psql -U crawler_user -d crawler_db -c \
-			"TRUNCATE crawl_jobs, crawl_credentials, pages, page_snapshots, ui_elements, entities, actions, relationships, workflows, workflow_steps, workflow_runs, knowledge_summaries CASCADE;"; \
+			"TRUNCATE crawl_jobs, crawl_credentials, pages, page_snapshots, ui_elements, entities, actions, relationships, workflows, workflow_steps, workflow_runs, knowledge_summaries, users, user_auth_logs CASCADE;"; \
 		echo "Postgres data cleared."; \
 	else \
 		echo "Aborted."; \

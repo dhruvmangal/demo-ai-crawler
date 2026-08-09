@@ -28,30 +28,34 @@ Results are persisted to Postgres (relational) and projected into Neo4j
 | `extension-builder` | Build-only: bundles the Chrome extension into `extension/dist` | — |
 
 A crawl job's life cycle: `POST /api/crawl` inserts a `PENDING` row →
-`crawl-worker` picks it up, crawls with a headless browser, extracts
-knowledge, writes it to Postgres + Neo4j, marks the job `COMPLETED` (or
-`FAILED` with an `error_message`).
+`crawl-worker` picks it up (`RUNNING`), crawls with a headless browser. Once
+crawling finishes the job moves to `ENRICHING` and AI summarization/knowledge
+extraction/graph projection run in the background (bounded by
+`ENRICH_CONCURRENCY`, default 2) *without* blocking the worker's polling loop
+from picking up the next `PENDING` job's crawl — the LLM phase of one job never
+delays another job's crawl from starting. The job is marked `COMPLETED` once
+enrichment finishes (or `FAILED` with an `error_message`).
 
-The `llm` service is used twice per crawl:
-1. **Per page**: `crawl-worker` sends each page's HTML plus its
+The `llm` service is used twice per crawl with built-in cost and performance optimizations:
+1. **Per page**: `crawl-worker` sends each page's semantic HTML structure (trimmed by default to 1,500 chars) plus its
    already-discovered UI elements, and gets back a page-level
-   summary/description and a per-component description. Stored on
-   `pages.ai_summary` / `pages.ai_description` and
-   `ui_elements.ai_description`, projected onto `:Page` and `:Component`
-   (`HAS_COMPONENT`) nodes in Neo4j.
+   summary/description and a per-component description.
+   - **DOM-Hash Deduplication & Caching**: Pages with identical `domHash` (e.g. parametric routes `/customers/1`, `/customers/2`) reuse previous summaries without calling the LLM. Re-crawled projects retain unmodified page summaries.
+   - **Concurrent Processing**: Page summarization runs with a concurrency pool (`AI_CONCURRENCY=3` by default) rather than blocking serially.
+   - **Adaptive KV-Cache**: Allocates targeted context windows (`num_ctx: 2048`) instead of the maximum 8K, reducing CPU/GPU memory footprint.
+   - Stored on `pages.ai_summary` / `pages.ai_description` and `ui_elements.ai_description`, and projected onto `:Page` and `:Component` (`HAS_COMPONENT`) nodes in Neo4j incrementally, as each page's summary resolves — the graph fills in progressively rather than appearing all at once at the end of the crawl.
 2. **Once per crawl**: after all pages are summarized, `crawl-worker` sends
-   the condensed page/component summaries (not raw HTML) and asks the model
+   the condensed page summaries and deduplicated components (deduped by type/label to prevent repeating table buttons from bloating the prompt) and asks the model
    to infer the site's entities, actions, relationships, and workflows —
    generalizing to whatever the site actually is, rather than matching
    against a fixed set of templates. Stored in `entities`, `actions`,
    `relationships`, `workflows`, `workflow_steps`, projected as `:Entity`/
    `:Action`/`:Workflow`/`:WorkflowStep` nodes in Neo4j.
 
-Both are best-effort — a model failure/timeout logs a warning; page/component
+Both are best-effort with exponential backoff on retries — a model failure/timeout logs a warning; page/component
 fields are left `NULL`, and if the second pass fails, entities/actions/
 relationships/workflows are simply empty for that crawl, rather than failing
-the job. This means those four now depend on the `llm` service — with
-`AI_SUMMARIZATION_ENABLED=false`, pages/components still crawl fine but no
+the job. With `AI_SUMMARIZATION_ENABLED=false`, pages/components still crawl fine but no
 entities/relationships/workflows are produced.
 
 ## Prerequisites
@@ -212,6 +216,11 @@ Set via environment variables (see `docker-compose.yml`):
 | `OLLAMA_URL` | `http://llm:11434` | Ollama server used for AI page/component summarization |
 | `OLLAMA_MODEL` | `qwen2.5:3b-instruct` | Model tag to pull and run in the `llm` service |
 | `AI_SUMMARIZATION_ENABLED` | `true` | Set to `false` to skip LLM calls entirely (faster crawls, no `llm` dependency) |
+| `AI_CONCURRENCY` | `3` | Number of pages to summarize concurrently with the local LLM |
+| `AI_MAX_HTML_CHARS` | `1500` | Max character length of structural HTML included in page summarization prompts |
+| `OLLAMA_TIMEOUT_MS` | `180000` | Timeout per LLM inference attempt in milliseconds |
+| `ENRICH_CONCURRENCY` | `2` | Number of crawl jobs' AI summarization/graph-projection phases the worker runs at once, in the background, without blocking the next job's crawl |
+| `CRAWL_TTL_HOURS` | `24` | How long a completed crawl stays "fresh" for its exact target URL. A new `POST /api/crawl` for the same URL within this window returns the existing job/project instead of re-crawling. Set to `0` to disable and always re-crawl |
 | `RECORDINGS_DIR` | `/usr/src/app/recordings` | Shared volume where `workflow-agent-worker` writes videos/captions and `crawler-app` serves them from |
 
 ## Development notes

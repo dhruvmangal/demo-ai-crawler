@@ -6,7 +6,7 @@ export interface CrawlJob {
   id: string;
   project_id: string;
   target_url: string;
-  status: 'PENDING' | 'RUNNING' | 'AWAITING_CREDENTIALS' | 'COMPLETED' | 'FAILED';
+  status: 'PENDING' | 'RUNNING' | 'AWAITING_CREDENTIALS' | 'ENRICHING' | 'COMPLETED' | 'FAILED';
   started_at?: string | null;
   completed_at?: string | null;
   error_message?: string | null;

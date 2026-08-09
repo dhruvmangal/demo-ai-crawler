@@ -10,10 +10,75 @@
   ],
   "tags": [
     { "name": "Health", "description": "Service health check" },
+    { "name": "Auth", "description": "User authentication, Google/GitHub OAuth sync, and audit logs" },
     { "name": "Crawl", "description": "Queue and track website crawl jobs" },
     { "name": "Knowledge", "description": "Read back the extracted knowledge graph and summary" }
   ],
   "paths": {
+    "/api/auth/sync": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Synchronize user profile from Google or GitHub OAuth",
+        "description": "Upserts user in PostgreSQL and automatically records a SIGNUP or LOGIN audit event.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "name", "provider"],
+                "properties": {
+                  "email": { "type": "string", "format": "email", "example": "user@gmail.com" },
+                  "name": { "type": "string", "example": "Alex Mercer" },
+                  "avatarUrl": { "type": "string", "example": "https://lh3.googleusercontent.com/..." },
+                  "provider": { "type": "string", "enum": ["google", "github", "demo"], "example": "google" },
+                  "providerUserId": { "type": "string", "example": "google_sub_12345" },
+                  "role": { "type": "string", "example": "user" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "User updated and login logged successfully" },
+          "201": { "description": "User registered and signup logged successfully" }
+        }
+      }
+    },
+    "/api/auth/users": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "List registered users",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0 } }
+        ],
+        "responses": {
+          "200": { "description": "List of users with last login status" }
+        }
+      }
+    },
+    "/api/auth/logs": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "List authentication audit logs",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Recent signups, logins, and logouts" }
+        }
+      }
+    },
+    "/api/auth/stats": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Aggregated user and authentication statistics",
+        "responses": {
+          "200": { "description": "Total users, signups, logins, and provider breakdown" }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": ["Health"],
@@ -40,7 +105,7 @@
       "post": {
         "tags": ["Crawl"],
         "summary": "Queue a website discovery crawl",
-        "description": "Inserts a PENDING crawl_jobs row. The crawl-worker service polls for pending jobs, runs the Playwright crawl, and builds the knowledge graph asynchronously.",
+        "description": "Inserts a PENDING crawl_jobs row. The crawl-worker service polls for pending jobs, runs the Playwright crawl, and builds the knowledge graph asynchronously. If this exact targetUrl already has a COMPLETED crawl within CRAWL_TTL_HOURS (default 24h), that existing job/project is returned instead (response.cached=true) rather than queuing a new crawl.",
         "requestBody": {
           "required": true,
           "content": {
@@ -67,6 +132,14 @@
         "responses": {
           "201": {
             "description": "Crawl job queued",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CrawlJobResponse" }
+              }
+            }
+          },
+          "200": {
+            "description": "An existing COMPLETED crawl for this targetUrl is still within CRAWL_TTL_HOURS; it was returned instead of queuing a new crawl (response.cached=true)",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/CrawlJobResponse" }
@@ -207,7 +280,7 @@
           "target_url": { "type": "string" },
           "status": {
             "type": "string",
-            "enum": ["PENDING", "RUNNING", "AWAITING_CREDENTIALS", "COMPLETED", "FAILED"]
+            "enum": ["PENDING", "RUNNING", "AWAITING_CREDENTIALS", "ENRICHING", "COMPLETED", "FAILED"]
           },
           "login_url": {
             "type": "string",
@@ -223,6 +296,7 @@
         "type": "object",
         "properties": {
           "message": { "type": "string", "example": "Crawl job queued successfully" },
+          "cached": { "type": "boolean", "description": "True if an existing completed crawl within CRAWL_TTL_HOURS was returned instead of queuing a new one" },
           "job": { "$ref": "#/components/schemas/CrawlJob" }
         }
       },

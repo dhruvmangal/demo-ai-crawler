@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS crawl_jobs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     project_id UUID NOT NULL,
     target_url TEXT NOT NULL,
-    status VARCHAR(50) NOT NULL, -- PENDING, RUNNING, AWAITING_CREDENTIALS, COMPLETED, FAILED
+    status VARCHAR(50) NOT NULL, -- PENDING, RUNNING, AWAITING_CREDENTIALS, ENRICHING, COMPLETED, FAILED
     login_url TEXT, -- set when status = AWAITING_CREDENTIALS: the page that needs login
     started_at TIMESTAMP WITH TIME ZONE,
     completed_at TIMESTAMP WITH TIME ZONE,
@@ -147,3 +147,79 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     completed_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- workflow_scripts: one persisted, reusable Playwright script per workflow, produced by
+-- the planner/generator agent pipeline (src/agent/script-planner.ts, script-generator.ts)
+-- and repaired in place by the healer (src/agent/script-healer.ts) when a step's selector
+-- goes stale. step_metadata is the executable artifact -- an array of
+-- {stepNumber, narration, code, skipped, knowledgeContext}, where `code` is the body of an
+-- `async (page, ctx) => {...}` function compiled at run time via node:vm. source_code is a
+-- human-readable rendering of step_metadata for debugging/export; it is never parsed or
+-- executed. status flips to NEEDS_REGENERATION when a heal-and-retry still fails, so the
+-- next run regenerates from scratch instead of retrying the same broken script.
+CREATE TABLE IF NOT EXISTS workflow_scripts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workflow_id UUID NOT NULL UNIQUE REFERENCES workflows(id) ON DELETE CASCADE,
+    source_code TEXT NOT NULL,
+    step_metadata JSONB NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'ACTIVE', -- ACTIVE, NEEDS_REGENERATION
+    version INTEGER NOT NULL DEFAULT 1,
+    model VARCHAR(100) NOT NULL,
+    generated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_run_id UUID REFERENCES workflow_runs(id) ON DELETE SET NULL,
+    last_run_status VARCHAR(50), -- SUCCEEDED, FAILED
+    heal_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_scripts_workflow_id ON workflow_scripts(workflow_id);
+
+-- workflow_script_heals: append-only audit trail, one row per heal attempt (successful or
+-- not), so a persisted script's degradation/repair history over time is inspectable.
+CREATE TABLE IF NOT EXISTS workflow_script_heals (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workflow_script_id UUID NOT NULL REFERENCES workflow_scripts(id) ON DELETE CASCADE,
+    workflow_run_id UUID REFERENCES workflow_runs(id) ON DELETE SET NULL,
+    failed_step_number INTEGER,
+    error_message TEXT,
+    outcome VARCHAR(50) NOT NULL, -- HEALED, HEAL_FAILED
+    diff_summary TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_script_heals_script_id ON workflow_script_heals(workflow_script_id);
+
+-- users: stores user profiles authenticated via Google OAuth, GitHub OAuth, or local demo.
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email VARCHAR(255) NOT NULL UNIQUE,
+    name VARCHAR(255) NOT NULL,
+    avatar_url TEXT,
+    provider VARCHAR(50) NOT NULL, -- google, github, demo
+    provider_user_id VARCHAR(255),
+    role VARCHAR(50) NOT NULL DEFAULT 'user', -- user, admin
+    last_login_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- user_auth_logs: audit trail tracking every authentication event (signup, login, logout, refresh).
+CREATE TABLE IF NOT EXISTS user_auth_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    event_type VARCHAR(50) NOT NULL, -- SIGNUP, LOGIN, LOGOUT, TOKEN_REFRESH
+    provider VARCHAR(50) NOT NULL, -- google, github, demo
+    ip_address VARCHAR(100),
+    user_agent TEXT,
+    metadata JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for performant user queries and auth event metrics
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_provider ON users(provider);
+CREATE INDEX IF NOT EXISTS idx_auth_logs_user_id ON user_auth_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_logs_created_at ON user_auth_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_logs_event_type ON user_auth_logs(event_type);
+

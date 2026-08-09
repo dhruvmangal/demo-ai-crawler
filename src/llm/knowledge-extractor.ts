@@ -71,9 +71,21 @@ export class KnowledgeExtractor {
       .map(p => `- ${p.url} "${p.title}"${p.aiSummary ? ` - ${p.aiSummary}` : ''}`)
       .join('\n');
 
-    const elementsList = input.elements
-      .slice()
-      .sort((a, b) => b.confidence - a.confidence)
+    // Deduplicate elements by (pageUrl, type, label) and rank by confidence to avoid
+    // sending dozens of repetitive action buttons (e.g. table row delete buttons)
+    const seenElementKeys = new Set<string>();
+    const uniqueElements = [];
+    const sortedElements = input.elements.slice().sort((a, b) => b.confidence - a.confidence);
+
+    for (const el of sortedElements) {
+      const key = `${el.pageUrl}::${el.type}::${el.label.trim().toLowerCase()}`;
+      if (!seenElementKeys.has(key)) {
+        seenElementKeys.add(key);
+        uniqueElements.push(el);
+      }
+    }
+
+    const elementsList = uniqueElements
       .slice(0, MAX_ELEMENTS)
       .map(e => {
         const desc = (e.aiDescription || '').slice(0, MAX_ELEMENT_DESC_CHARS);
@@ -99,7 +111,10 @@ Respond with ONLY a JSON object matching this exact shape, no other text:
   "workflows": [{ "name": "string", "confidence": 0.0-1.0, "steps": [{ "pageUrl": "string (copy exactly from the pages list)", "entityName": "string", "actionType": "string" }] }]
 }`;
 
-    const result = await OllamaClient.generateJson(prompt, PROJECT_LEVEL_TIMEOUT_MS);
+    const result = await OllamaClient.generateJson(prompt, {
+      numCtx: 4096,
+      timeoutMs: PROJECT_LEVEL_TIMEOUT_MS
+    });
     if (!result || !Array.isArray(result.entities)) {
       return null;
     }

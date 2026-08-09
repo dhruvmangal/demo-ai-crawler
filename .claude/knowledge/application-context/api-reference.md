@@ -7,6 +7,10 @@ This is the practical/annotated version. Base path for everything below is
 | Method & Path | Body / Params | Returns | Notes |
 |---|---|---|---|
 | `GET /health` | — | `{status, timestamp}` | liveness check, no DB access |
+| `POST /api/auth/sync` | `{email, name, avatarUrl?, provider, providerUserId?, role?, metadata?}` | `200/201 {success, user, isNewUser, logId}` | Upserts user profile in Postgres and logs `SIGNUP` or `LOGIN` audit event |
+| `GET /api/auth/users` | `?limit=50&offset=0` | `{users, total}` | Lists registered users and their last login |
+| `GET /api/auth/logs` | `?limit=50` | `{logs, count}` | Lists recent authentication audit trails |
+| `GET /api/auth/stats` | — | `{totalUsers, totalSignups, totalLogins, providerBreakdown, recentLogins}` | User and authentication analytics |
 | `POST /api/crawl` | `{targetUrl, projectId?}` | `201 {message, job}` | `projectId` optional — server mints a UUID if omitted. Inserts `crawl_jobs` row, `status=PENDING` |
 | `GET /api/crawl/:id` | — | job row (`id, project_id, target_url, status, login_url, started_at, completed_at, error_message`) | `404` if unknown id |
 | `POST /api/crawl/:id/credentials` | `{username, password}` | `{message}` | only valid when job `status=AWAITING_CREDENTIALS`; `409` otherwise. Writes to `crawl_credentials`, flips job back to `PENDING` |
@@ -21,7 +25,9 @@ This is the practical/annotated version. Base path for everything below is
 **Crawl a site and read results:**
 ```
 POST /api/crawl {targetUrl}          -> job.id, job.project_id
-poll GET /api/crawl/:id              -> until status COMPLETED|FAILED
+poll GET /api/crawl/:id              -> RUNNING (crawling) -> ENRICHING (AI/graph work,
+                                         backgrounded so it never blocks the next job's
+                                         crawl) -> until status COMPLETED|FAILED
 GET /api/summary/:project_id         -> lightweight digest
 GET /api/graph/:project_id           -> full graph for visualization/automation
 ```

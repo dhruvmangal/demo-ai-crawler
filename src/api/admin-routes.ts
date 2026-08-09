@@ -44,7 +44,7 @@ adminRouter.get('/requests', async (req: Request, res: Response) => {
       ),
       query(
         `SELECT (SELECT COUNT(*)::int FROM crawl_jobs)                                  AS requests,
-                (SELECT COUNT(*)::int FROM crawl_jobs WHERE status IN ('PENDING','RUNNING','AWAITING_CREDENTIALS')) AS requests_active,
+                (SELECT COUNT(*)::int FROM crawl_jobs WHERE status IN ('PENDING','RUNNING','AWAITING_CREDENTIALS','ENRICHING')) AS requests_active,
                 (SELECT COUNT(*)::int FROM pages)                                       AS pages,
                 (SELECT COUNT(*)::int FROM entities)                                    AS entities,
                 (SELECT COUNT(*)::int FROM workflows)                                   AS workflows,

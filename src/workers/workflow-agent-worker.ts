@@ -1,14 +1,39 @@
 import path from 'path';
+import { Worker } from 'worker_threads';
 import { query } from '../config/database';
-import { WorkflowRecorder } from '../recorder/workflow-recorder';
-import { WorkflowRunStep } from '../types/workflow-runs';
 
 const POLL_INTERVAL_MS = 5000;
-const RECORDINGS_DIR = process.env.RECORDINGS_DIR || path.join(__dirname, '..', '..', 'recordings');
 
-const recorder = new WorkflowRecorder(RECORDINGS_DIR);
+// Bounds how many recording runs execute concurrently. Each unit of work is a real
+// worker_threads Worker driving its own headless Chromium (recording-worker-thread.ts),
+// not bounded async concurrency, so the *claim* itself is gated on this counter --
+// unlike crawl-worker.ts's ENRICH_CONCURRENCY (which bounds a later phase, never the
+// claim), claiming a PENDING run with no worker free to run it would leave it stuck
+// RUNNING with nothing processing it.
+const RECORDING_CONCURRENCY = Math.max(1, Number(process.env.RECORDING_CONCURRENCY) || 2);
+let activeWorkers = 0;
+
+function recordRun(run: { id: string; workflow_id: string }): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, 'recording-worker-thread.js'), {
+      workerData: { runId: run.id, workflowId: run.workflow_id }
+    });
+    worker.once('message', (msg: { ok: boolean; error?: string }) => {
+      if (msg.ok) resolve();
+      else reject(new Error(msg.error || 'Recording worker reported failure.'));
+    });
+    worker.once('error', reject);
+    worker.once('exit', code => {
+      if (code !== 0) reject(new Error(`Recording worker exited with code ${code}`));
+    });
+  });
+}
 
 async function processNextRun() {
+  if (activeWorkers >= RECORDING_CONCURRENCY) {
+    return; // no room this tick -- the poll loop retries in POLL_INTERVAL_MS
+  }
+
   const selectRes = await query(
     `UPDATE workflow_runs
      SET status = 'RUNNING', started_at = CURRENT_TIMESTAMP
@@ -29,48 +54,14 @@ async function processNextRun() {
   const run = selectRes.rows[0];
   console.log(`[Workflow Agent] Recording run ${run.id} for workflow ${run.workflow_id}`);
 
-  try {
-    const stepsRes = await query(
-      `SELECT ws.step_number   AS "stepNumber",
-              p.url            AS "pageUrl",
-              p.title          AS "pageTitle",
-              p.ai_summary     AS "pageAiSummary",
-              p.ai_description AS "pageAiDescription",
-              a.action_type    AS "actionType",
-              a.selector       AS "actionSelector",
-              e.name           AS "entityName"
-       FROM workflow_steps ws
-       LEFT JOIN pages p ON p.id = ws.page_id
-       LEFT JOIN actions a ON a.id = ws.action_id
-       LEFT JOIN entities e ON e.id = ws.entity_id
-       WHERE ws.workflow_id = $1
-       ORDER BY ws.step_number ASC`,
-      [run.workflow_id]
-    );
-
-    const steps: WorkflowRunStep[] = stepsRes.rows;
-    if (steps.length === 0) {
-      throw new Error('Workflow has no steps to record.');
-    }
-
-    const result = await recorder.record(run.id, steps);
-
-    await query(
-      `UPDATE workflow_runs
-       SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP, video_path = $1, captions_path = $2
-       WHERE id = $3`,
-      [path.basename(result.videoPath), path.basename(result.captionsPath), run.id]
-    );
-    console.log(`[Workflow Agent] Run ${run.id} completed.`);
-  } catch (err: any) {
-    console.error(`[Workflow Agent] Run ${run.id} failed:`, err);
-    await query(
-      `UPDATE workflow_runs
-       SET status = 'FAILED', completed_at = CURRENT_TIMESTAMP, error_message = $1
-       WHERE id = $2`,
-      [err?.message || String(err), run.id]
-    );
-  }
+  activeWorkers++;
+  recordRun(run)
+    .catch(err => console.error(`[Workflow Agent] Run ${run.id} worker error:`, err))
+    .finally(() => {
+      activeWorkers--;
+    });
+  // Deliberately not awaited: the poll loop keeps claiming/looping immediately so up
+  // to RECORDING_CONCURRENCY runs can be in flight at once.
 }
 
 async function run() {

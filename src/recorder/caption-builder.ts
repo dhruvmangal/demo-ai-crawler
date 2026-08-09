@@ -1,5 +1,3 @@
-import { WorkflowRunStep } from '../types/workflow-runs';
-
 export interface Cue {
   startMs: number;
   endMs: number;
@@ -11,37 +9,14 @@ function escapeVtt(text: string): string {
 }
 
 /**
- * Builds one caption line per step. Prefers the orchestrating agent's own narration
- * of what it did (see workflow-orchestrator.ts); falls back to a static template
- * built from the AI descriptions/entities collected during the crawl when no
- * narration is available (e.g. the agent path wasn't used for this step).
+ * Builds one caption line per step, from the narration decided once at script
+ * generation/heal time (see deterministic-script-engine.ts/script-healer.ts) and stored
+ * on the step -- there's no live per-run narration call anymore, so narration is always
+ * present by construction.
  */
-export function buildCaptionText(step: WorkflowRunStep, actionSkipped: boolean, narration?: string): string {
-  let body: string;
-
-  if (narration) {
-    body = narration;
-  } else {
-    const parts: string[] = [];
-
-    if (step.actionType && step.entityName) {
-      parts.push(`${step.actionType} ${step.entityName}`);
-    } else if (step.actionType) {
-      parts.push(step.actionType);
-    }
-
-    const description = step.pageAiDescription || step.pageAiSummary;
-    if (description) {
-      parts.push(description);
-    } else if (step.pageTitle) {
-      parts.push(`Viewing ${step.pageTitle}`);
-    }
-
-    body = parts.length > 0 ? parts.join(' — ') : step.pageUrl || 'Unknown step';
-  }
-
+export function buildCaptionText(stepNumber: number, actionSkipped: boolean, narration: string): string {
   const suffix = actionSkipped ? ' (action skipped for safety)' : '';
-  return escapeVtt(`Step ${step.stepNumber}: ${body}${suffix}`);
+  return escapeVtt(`Step ${stepNumber}: ${narration}${suffix}`);
 }
 
 function msToVttTimestamp(ms: number): string {

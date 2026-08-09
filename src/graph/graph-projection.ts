@@ -5,7 +5,98 @@ import { Workflow, WorkflowStep } from '../types/workflows';
 
 export class GraphProjection {
   /**
-   * Projects a full relational model into Neo4j nodes and edges for a given project.
+   * Wipes all nodes/relationships for a project. Called once, up front, so incremental
+   * per-page writes made during AI enrichment (see upsertPage/upsertComponent) start from
+   * a clean graph instead of layering on top of the previous crawl's stale nodes.
+   */
+  public static async clearProject(projectId: string): Promise<void> {
+    const driver = getNeo4jDriver();
+    const session = driver.session();
+    try {
+      await session.run(
+        `MATCH (n) WHERE n.projectId = $projectId DETACH DELETE n`,
+        { projectId }
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Upserts a single Page node. Called as soon as a page is known (structural fields)
+   * and again whenever its AI summary/description resolves, so the graph reflects
+   * enrichment progress instead of only appearing once the whole crawl finishes.
+   * Uses its own session since callers may invoke this concurrently across pages
+   * (Neo4j sessions aren't safe to share across overlapping concurrent queries).
+   */
+  public static async upsertPage(projectId: string, page: Page): Promise<void> {
+    const driver = getNeo4jDriver();
+    const session = driver.session();
+    try {
+      await session.run(
+        `MERGE (p:Page {id: $id})
+         SET p.projectId = $projectId,
+             p.url = $url,
+             p.title = $title,
+             p.breadcrumb = $breadcrumb,
+             p.viaLabel = $viaLabel,
+             p.viaSelector = $viaSelector,
+             p.aiSummary = $aiSummary,
+             p.aiDescription = $aiDescription`,
+        {
+          id: page.id,
+          projectId,
+          url: page.url,
+          title: page.title,
+          breadcrumb: page.breadcrumb || '',
+          viaLabel: page.viaLabel || '',
+          viaSelector: page.viaSelector || '',
+          aiSummary: page.aiSummary || '',
+          aiDescription: page.aiDescription || ''
+        }
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Upserts a single Component (UI element) node linked to its Page. Called as soon as
+   * the element is discovered, and again once its AI-generated description resolves.
+   */
+  public static async upsertComponent(projectId: string, pageId: string, el: UiElement): Promise<void> {
+    const driver = getNeo4jDriver();
+    const session = driver.session();
+    try {
+      await session.run(
+        `MATCH (p:Page {id: $pageId})
+         MERGE (c:Component {id: $id})
+         SET c.projectId = $projectId,
+             c.type = $type,
+             c.label = $label,
+             c.selector = $selector,
+             c.aiDescription = $aiDescription
+         MERGE (p)-[:HAS_COMPONENT]->(c)`,
+        {
+          id: el.id,
+          projectId,
+          pageId,
+          type: el.type,
+          label: el.label,
+          selector: el.selector,
+          aiDescription: el.aiDescription || ''
+        }
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Projects the remaining relational model (page hierarchy, entities, actions,
+   * relationships, workflows) into Neo4j. Pages and Components are expected to already
+   * exist via upsertPage/upsertComponent -- this only adds what depends on the
+   * project-wide AI knowledge-extraction pass, which necessarily runs once at the end.
    */
   public static async project(
     projectId: string,
@@ -23,66 +114,6 @@ export class GraphProjection {
     const session = driver.session();
 
     try {
-      // 1. Clear existing nodes/relations for this project to ensure clean project state
-      await session.run(
-        `MATCH (n) WHERE n.projectId = $projectId DETACH DELETE n`,
-        { projectId }
-      );
-
-      // 2. Insert Pages & Page Parent-Child relationships
-      for (const page of data.pages) {
-        await session.run(
-          `CREATE (p:Page {
-            id: $id,
-            projectId: $projectId,
-            url: $url,
-            title: $title,
-            breadcrumb: $breadcrumb,
-            viaLabel: $viaLabel,
-            viaSelector: $viaSelector,
-            aiSummary: $aiSummary,
-            aiDescription: $aiDescription
-          })`,
-          {
-            id: page.id,
-            projectId,
-            url: page.url,
-            title: page.title,
-            breadcrumb: page.breadcrumb || '',
-            viaLabel: page.viaLabel || '',
-            viaSelector: page.viaSelector || '',
-            aiSummary: page.aiSummary || '',
-            aiDescription: page.aiDescription || ''
-          }
-        );
-      }
-
-      // Insert UI Elements as Component nodes, linked from their Page, carrying the
-      // LLM-generated description of what that specific component does.
-      for (const el of data.uiElements) {
-        await session.run(
-          `MATCH (p:Page {id: $pageId})
-           CREATE (c:Component {
-             id: $id,
-             projectId: $projectId,
-             type: $type,
-             label: $label,
-             selector: $selector,
-             aiDescription: $aiDescription
-           })
-           CREATE (p)-[:HAS_COMPONENT]->(c)`,
-          {
-            id: el.id,
-            projectId,
-            pageId: el.pageId,
-            type: el.type,
-            label: el.label,
-            selector: el.selector,
-            aiDescription: el.aiDescription || ''
-          }
-        );
-      }
-
       // Establish Page parent-child relationships, carrying the label/selector of the
       // link or button that was clicked to navigate from parent to child (if known).
       for (const page of data.pages) {

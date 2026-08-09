@@ -12,15 +12,3 @@ export interface WorkflowRun {
   completedAt?: Date | null;
   createdAt?: Date;
 }
-
-/** One resolved workflow step, joined from workflow_steps + pages + actions + entities. */
-export interface WorkflowRunStep {
-  stepNumber: number;
-  pageUrl?: string | null;
-  pageTitle?: string | null;
-  pageAiSummary?: string | null;
-  pageAiDescription?: string | null;
-  actionType?: string | null;
-  actionSelector?: string | null;
-  entityName?: string | null;
-}

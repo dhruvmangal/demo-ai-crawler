@@ -5,6 +5,72 @@ import { KnowledgeSummarizer } from '../knowledge/knowledge-summarizer';
 
 const POLL_INTERVAL_MS = 5000;
 
+// Bounds how many jobs' AI summarization/graph-projection phases run at once. Crawling
+// itself is cheap and I/O bound; the LLM phase is what's slow, so it's capped and run
+// off the polling loop instead of blocking the next job's crawl from starting.
+const ENRICH_CONCURRENCY = Math.max(1, Number(process.env.ENRICH_CONCURRENCY) || 2);
+
+class AsyncSemaphore {
+  private available: number;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(count: number) {
+    this.available = count;
+  }
+
+  async acquire(): Promise<() => void> {
+    if (this.available > 0) {
+      this.available--;
+      return () => this.release();
+    }
+    return new Promise(resolve => {
+      this.waiters.push(() => {
+        this.available--;
+        resolve(() => this.release());
+      });
+    });
+  }
+
+  private release() {
+    this.available++;
+    const next = this.waiters.shift();
+    if (next) next();
+  }
+}
+
+const enrichSemaphore = new AsyncSemaphore(ENRICH_CONCURRENCY);
+
+/**
+ * Runs AI summarization, knowledge extraction, and graph projection for an already-crawled
+ * job. Deliberately not awaited by the polling loop -- the next PENDING job's crawl should
+ * be able to start as soon as this job's crawl finishes, without waiting on the LLM.
+ */
+async function enrichJob(job: { id: string; project_id: string }, rawPages: Awaited<ReturnType<PlaywrightCrawler['crawl']>>) {
+  const release = await enrichSemaphore.acquire();
+  try {
+    const builtKnowledge = await KnowledgeBuilder.build(job.project_id, rawPages);
+    await KnowledgeSummarizer.summarize(job.project_id, builtKnowledge);
+
+    await query(
+      `UPDATE crawl_jobs
+       SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [job.id]
+    );
+    console.log(`[Crawl Worker] Job ${job.id} successfully finished!`);
+  } catch (err: any) {
+    console.error(`[Crawl Worker] Job ${job.id} enrichment failed:`, err);
+    await query(
+      `UPDATE crawl_jobs
+       SET status = 'FAILED', completed_at = CURRENT_TIMESTAMP, error_message = $1
+       WHERE id = $2`,
+      [err?.message || String(err), job.id]
+    );
+  } finally {
+    release();
+  }
+}
+
 async function processNextJob() {
   // 1. Fetch next pending job
   const selectRes = await query(
@@ -48,20 +114,11 @@ async function processNextJob() {
       credentials
     });
 
-    // Save outputs using KnowledgeBuilder (inserts SQL, pushes to Neo4j)
-    await KnowledgeBuilder.build(job.project_id, rawPages);
-
-    // Generate high-level lightweight summary
-    await KnowledgeSummarizer.summarize(job.project_id);
-
-    // Update job status to COMPLETED
-    await query(
-      `UPDATE crawl_jobs
-       SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
-      [job.id]
-    );
-    console.log(`[Crawl Worker] Job ${job.id} successfully finished!`);
+    // Crawling is done. Hand off AI summarization/knowledge extraction/graph projection
+    // to run in the background (bounded by ENRICH_CONCURRENCY) instead of awaiting it here
+    // -- otherwise the next PENDING job's crawl would sit blocked behind this job's LLM calls.
+    await query(`UPDATE crawl_jobs SET status = 'ENRICHING' WHERE id = $1`, [job.id]);
+    enrichJob(job, rawPages).catch(err => console.error(`[Crawl Worker] Unhandled enrichment error for job ${job.id}:`, err));
 
   } catch (err: any) {
     if (err instanceof LoginRequiredError) {

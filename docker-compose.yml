@@ -62,6 +62,7 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=crawler_neo4j_password
       - RECORDINGS_DIR=/usr/src/app/recordings
+      - CRAWL_TTL_HOURS=24
     volumes:
       - recordings:/usr/src/app/recordings
     depends_on:
@@ -104,17 +105,25 @@ services:
       - OLLAMA_URL=http://llm:11434
       - OLLAMA_MODEL=qwen2.5:3b-instruct
       - AI_SUMMARIZATION_ENABLED=true
+      - AI_CONCURRENCY=3
+      - AI_MAX_HTML_CHARS=1500
+      - OLLAMA_TIMEOUT_MS=180000
+      - ENRICH_CONCURRENCY=2
     depends_on:
       - postgres
       - neo4j
       - llm
 
-  # Playwright recording agent: polls workflow_runs, and for each step, an LLM-driven
-  # orchestrator (workflow-orchestrator.ts) acts through a Playwright-MCP-style tool
-  # surface (browser-tools.ts) to carry out and narrate the step in a fresh headless
-  # browser, recording video and writing WebVTT captions from the agent's narration.
-  # Shares the `recordings` volume with crawler-app, which serves it at /recordings/*.
-  # Requires ANTHROPIC_API_KEY to be set in the shell environment or a .env file.
+  # Playwright recording agent: polls workflow_runs and dispatches each claimed run to
+  # its own worker_threads Worker (recording-worker-thread.ts, up to RECORDING_CONCURRENCY
+  # at once) so the poller itself never blocks. A workflow's first run generates and
+  # persists a Playwright script via a planner/generator agent pair (script-planner.ts,
+  # script-generator.ts -- verifying selectors against a live page as it writes the
+  # script); every later run of the same workflow replays that persisted script with no
+  # LLM calls at all, unless a step throws, in which case script-healer.ts repairs it in
+  # place, mid-recording, and the fix is persisted for next time. Shares the `recordings`
+  # volume with crawler-app, which serves it at /recordings/*. Requires ANTHROPIC_API_KEY
+  # to be set in the shell environment or a .env file.
   workflow-agent-worker:
     build: .
     container_name: crawler_workflow_agent
@@ -123,6 +132,7 @@ services:
       - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
       - RECORDINGS_DIR=/usr/src/app/recordings
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - RECORDING_CONCURRENCY=2
     volumes:
       - recordings:/usr/src/app/recordings
     depends_on:

@@ -9,7 +9,9 @@
     "dev": "tsx watch src/api/server.ts",
     "worker:crawl": "npm run build && node dist/workers/crawl-worker.js",
     "worker:record": "npm run build && node dist/workers/workflow-agent-worker.js",
-    "test:mock": "npm run build && node dist/test-crawler.js"
+    "test:mock": "npm run build && node dist/test-crawler.js",
+    "db:migrate": "npm run build && node dist/db/migrate.js",
+    "db:seed": "npm run build && node dist/db/seed.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

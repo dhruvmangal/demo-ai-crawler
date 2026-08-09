@@ -384,3 +384,238 @@ body {
   text-align: center;
   padding: 10px;
 }
+
+/* Authentication Header & Profile Styles */
+.hud-user-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.user-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--cyan);
+  object-fit: cover;
+  background: var(--bg);
+}
+
+.user-avatar-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--cyan-dim);
+  color: var(--cyan);
+  font-size: 11px;
+  background: rgba(53, 226, 255, 0.08);
+}
+
+.user-name {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.provider-badge {
+  font-size: 8px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: bold;
+}
+
+.provider-badge-google {
+  background: rgba(66, 133, 244, 0.18);
+  color: #4285f4;
+  border: 1px solid rgba(66, 133, 244, 0.5);
+}
+
+.provider-badge-github {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+.auth-header-btn {
+  background: transparent;
+  border: 1px solid var(--cyan-dim);
+  color: var(--cyan);
+  font-family: inherit;
+  font-size: 9px;
+  padding: 3px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+  letter-spacing: 1.5px;
+  transition: all 0.15s ease;
+}
+
+.auth-header-btn:hover {
+  background: rgba(53, 226, 255, 0.15);
+  border-color: var(--cyan);
+  box-shadow: 0 0 8px rgba(53, 226, 255, 0.4);
+}
+
+/* Auth View / Login Modal */
+.auth-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 0 20px rgba(53, 226, 255, 0.08);
+}
+
+.auth-box-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: var(--cyan);
+  text-shadow: 0 0 8px rgba(53, 226, 255, 0.5);
+}
+
+.auth-box-desc {
+  margin: 0 0 10px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.auth-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 2px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.auth-btn-google {
+  background: rgba(66, 133, 244, 0.12);
+  border: 1px solid #4285f4;
+  color: #d8e6ff;
+}
+
+.auth-btn-google:hover {
+  background: rgba(66, 133, 244, 0.25);
+  box-shadow: 0 0 14px rgba(66, 133, 244, 0.45);
+}
+
+.auth-btn-github {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  color: #ffffff;
+}
+
+.auth-btn-github:hover {
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.35);
+}
+
+.auth-icon {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 9px;
+  letter-spacing: 2px;
+  margin: 4px 0;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px dashed var(--border);
+}
+
+.auth-divider::before {
+  margin-right: 10px;
+}
+
+.auth-divider::after {
+  margin-left: 10px;
+}
+
+.profile-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.profile-avatar-large {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px solid var(--cyan);
+  box-shadow: 0 0 10px rgba(53, 226, 255, 0.4);
+}
+
+.profile-details h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.profile-details p {
+  margin: 2px 0 0;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.profile-metadata {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 9px;
+  color: var(--text-dim);
+  padding: 8px;
+  background: rgba(5, 8, 11, 0.6);
+  border-radius: 2px;
+  border-left: 2px solid var(--cyan);
+}
+

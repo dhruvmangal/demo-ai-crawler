@@ -3,16 +3,38 @@ import { Page, UiElement } from '../types/pages';
 import { Entity, Action, Relationship } from '../types/entities';
 import { Workflow, WorkflowStep } from '../types/workflows';
 import { GraphProjection } from '../graph/graph-projection';
-import { PageSummarizer } from '../llm/page-summarizer';
+import { PageSummarizer, PageSummaryResult } from '../llm/page-summarizer';
 import { KnowledgeExtractor } from '../llm/knowledge-extractor';
 import { v4 as uuidv4 } from 'uuid';
 
 const AI_SUMMARIZATION_ENABLED = process.env.AI_SUMMARIZATION_ENABLED !== 'false';
+const AI_CONCURRENCY = Math.max(1, Number(process.env.AI_CONCURRENCY) || 3);
+
+async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIdx = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIdx < items.length) {
+      const i = nextIdx++;
+      results[i] = await worker(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+export interface BuiltKnowledgeResult {
+  projectId: string;
+  pageCount: number;
+  entities: Entity[];
+  workflows: Array<{ name: string; confidence: number; flowEntities: string[] }>;
+}
 
 export class KnowledgeBuilder {
   /**
    * Orchestrates SQL insertion, AI-driven entity/action/relationship/workflow
-   * extraction, and graph projection.
+   * extraction, and graph projection. Includes DOM-hash deduplication, cross-crawl
+   * caching, concurrent page summarization, and in-memory data return.
    */
   public static async build(
     projectId: string,
@@ -28,15 +50,62 @@ export class KnowledgeBuilder {
       viaLabel?: string | null;
       viaSelector?: string | null;
     }>
-  ): Promise<void> {
+  ): Promise<BuiltKnowledgeResult> {
     console.log(`Starting Knowledge Builder for Project: ${projectId}`);
+
+    // Check for existing AI summaries from previous crawls to reuse on matching domHash
+    const domHashSummaryCache = new Map<
+      string,
+      { summary: string; description: string; components: Array<{ selector: string; description: string }> }
+    >();
+    try {
+      const existingCacheRes = await query(
+        `SELECT dom_hash, ai_summary, ai_description FROM pages WHERE project_id = $1 AND ai_summary IS NOT NULL`,
+        [projectId]
+      );
+      for (const row of existingCacheRes.rows) {
+        if (row.dom_hash && row.ai_summary) {
+          domHashSummaryCache.set(row.dom_hash, {
+            summary: row.ai_summary,
+            description: row.ai_description || '',
+            components: []
+          });
+        }
+      }
+
+      // Also pull cached per-component descriptions so a domHash cache hit can replay
+      // element-level AI descriptions too, not just the page-level summary.
+      if (domHashSummaryCache.size > 0) {
+        const existingComponentsRes = await query(
+          `SELECT p.dom_hash, u.selector, u.ai_description
+           FROM ui_elements u
+           JOIN pages p ON p.id = u.page_id
+           WHERE p.project_id = $1 AND u.ai_description IS NOT NULL`,
+          [projectId]
+        );
+        for (const row of existingComponentsRes.rows) {
+          const cached = domHashSummaryCache.get(row.dom_hash);
+          if (cached && row.selector && row.ai_description) {
+            cached.components.push({ selector: row.selector, description: row.ai_description });
+          }
+        }
+        console.log(`[KnowledgeBuilder] Reusing ${domHashSummaryCache.size} existing cached summaries from previous crawl.`);
+      }
+    } catch (e) {
+      // Non-fatal cache lookup failure
+    }
 
     // 1. Insert/Update Pages
     const pagesList: Page[] = [];
     const elementsList: UiElement[] = [];
+    const pageElementsMap = new Map<string, UiElement[]>();
 
     // Clean old elements for the project (handled by cascades in pages)
     await query(`DELETE FROM pages WHERE project_id = $1`, [projectId]);
+
+    // Clear the previous crawl's graph up front so incremental page/component writes
+    // below build a fresh graph instead of layering on top of stale nodes.
+    await GraphProjection.clearProject(projectId);
 
     // Insert pages first to obtain database IDs
     for (const rawPage of rawPages) {
@@ -86,26 +155,102 @@ export class KnowledgeBuilder {
         pageElements.push(elementRecord);
         elementsList.push(elementRecord);
       }
+      pageElementsMap.set(dbPageId, pageElements);
 
-      // AI enrichment: ask the local LLM to summarize this page's purpose/functionality
-      // and describe each discovered UI element. Best-effort -- a failure here (model
-      // unreachable, timeout, bad output) must never fail the crawl job.
-      if (AI_SUMMARIZATION_ENABLED && rawPage.html) {
+      // Write the structural Page/Component nodes to Neo4j as soon as they're known,
+      // rather than waiting for AI enrichment + graph projection to finish. AI fields
+      // are added below via further upsertPage/upsertComponent calls once available.
+      await GraphProjection.upsertPage(projectId, pageRecord);
+      for (const elementRecord of pageElements) {
+        await GraphProjection.upsertComponent(projectId, dbPageId, elementRecord);
+      }
+    }
+
+    // AI Page Enrichment with DOM-hash deduplication and concurrency pool
+    if (AI_SUMMARIZATION_ENABLED) {
+      // Group pages by domHash to only call LLM once per unique DOM state
+      const pagesToSummarize: Array<{
+        pageRecord: Page;
+        rawPage: (typeof rawPages)[0];
+        pageElements: UiElement[];
+      }> = [];
+
+      for (let i = 0; i < rawPages.length; i++) {
+        const rawPage = rawPages[i];
+        const pageRecord = pagesList[i];
+        const pageElements = pageElementsMap.get(pageRecord.id!) || [];
+
+        // Check if we already have a cached summary for this domHash
+        const cached = domHashSummaryCache.get(rawPage.domHash);
+        if (cached) {
+          console.log(`[KnowledgeBuilder] Reusing cached AI summary for DOM hash: ${rawPage.domHash} (${rawPage.url})`);
+          pageRecord.aiSummary = cached.summary;
+          pageRecord.aiDescription = cached.description;
+          await query(
+            `UPDATE pages SET ai_summary = $1, ai_description = $2 WHERE id = $3`,
+            [cached.summary, cached.description, pageRecord.id]
+          );
+          await GraphProjection.upsertPage(projectId, pageRecord);
+
+          // Replay cached per-component descriptions too, so a cache hit doesn't leave
+          // this page's UI elements without AI descriptions.
+          for (const comp of cached.components) {
+            const matchedEl = pageElements.find(e => e.selector === comp.selector);
+            if (matchedEl) {
+              matchedEl.aiDescription = comp.description;
+              await query(
+                `UPDATE ui_elements SET ai_description = $1 WHERE id = $2`,
+                [comp.description, matchedEl.id]
+              );
+              await GraphProjection.upsertComponent(projectId, pageRecord.id!, matchedEl);
+            }
+          }
+        } else if (rawPage.html) {
+          pagesToSummarize.push({ pageRecord, rawPage, pageElements });
+        }
+      }
+
+      // Concurrently summarize distinct pages
+      console.log(`[KnowledgeBuilder] Running page summarization for ${pagesToSummarize.length} pages (concurrency: ${AI_CONCURRENCY})...`);
+      await runWithConcurrency(pagesToSummarize, AI_CONCURRENCY, async ({ pageRecord, rawPage, pageElements }) => {
         try {
-          const aiResult = await PageSummarizer.summarize({
-            title: rawPage.title,
-            breadcrumb: rawPage.breadcrumb,
-            html: rawPage.html,
-            elements: pageElements
-          });
+          // Double-check cache in case an earlier page in this batch already resolved this domHash
+          const cached = domHashSummaryCache.get(rawPage.domHash);
+          let aiResult: PageSummaryResult | null = null;
+
+          if (cached) {
+            aiResult = {
+              summary: cached.summary,
+              description: cached.description,
+              components: cached.components
+            };
+          } else {
+            aiResult = await PageSummarizer.summarize({
+              title: rawPage.title,
+              breadcrumb: rawPage.breadcrumb,
+              html: rawPage.html || '',
+              elements: pageElements
+            });
+
+            if (aiResult) {
+              domHashSummaryCache.set(rawPage.domHash, {
+                summary: aiResult.summary,
+                description: aiResult.description,
+                components: aiResult.components.map(c => ({ selector: c.selector, description: c.description }))
+              });
+            }
+          }
 
           if (aiResult) {
             pageRecord.aiSummary = aiResult.summary;
             pageRecord.aiDescription = aiResult.description;
             await query(
               `UPDATE pages SET ai_summary = $1, ai_description = $2 WHERE id = $3`,
-              [aiResult.summary, aiResult.description, dbPageId]
+              [aiResult.summary, aiResult.description, pageRecord.id]
             );
+            // Push this page's AI summary into the graph as soon as it's ready, rather
+            // than waiting for every other page in the batch plus knowledge extraction.
+            await GraphProjection.upsertPage(projectId, pageRecord);
 
             for (const comp of aiResult.components) {
               const matchedEl = pageElements.find(e => e.selector === comp.selector);
@@ -115,21 +260,17 @@ export class KnowledgeBuilder {
                   `UPDATE ui_elements SET ai_description = $1 WHERE id = $2`,
                   [comp.description, matchedEl.id]
                 );
+                await GraphProjection.upsertComponent(projectId, pageRecord.id!, matchedEl);
               }
             }
           }
         } catch (err: any) {
           console.warn(`[KnowledgeBuilder] AI summarization failed for page ${rawPage.url}: ${err?.message || err}`);
         }
-      }
+      });
     }
 
     // 2. Resolve Page parent-child relations.
-    // Prefer the actual navigation link/button that was clicked to discover this page
-    // during the crawl (rawPage.parentUrl); this reflects the real site structure/click-path
-    // rather than guessing from URL shape. Fall back to URL sub-path nesting
-    // (e.g. /customers/new is child of /customers) only when no click-path was recorded
-    // (e.g. the start page, or a CDP-attached session).
     for (let i = 0; i < pagesList.length; i++) {
       const page = pagesList[i];
       const rawPage = rawPages[i];
@@ -158,16 +299,13 @@ export class KnowledgeBuilder {
       }
     }
 
-    // 3. AI knowledge extraction: entities, actions, relationships, and workflows,
-    // inferred by the LLM from the already-condensed page/component AI summaries
-    // (not raw HTML) -- generalizes to arbitrary sites instead of matching against
-    // hardcoded CRM-shaped templates. Best-effort: on failure/disabled, these stay
-    // empty for this crawl rather than failing the job.
+    // 3. AI knowledge extraction: entities, actions, relationships, and workflows
     const savedEntities: Entity[] = [];
     const savedActions: Action[] = [];
     const savedRelationships: Relationship[] = [];
     const savedWorkflows: Workflow[] = [];
     const savedSteps: WorkflowStep[] = [];
+    const workflowSummaryList: Array<{ name: string; confidence: number; flowEntities: string[] }> = [];
 
     await query(`DELETE FROM entities WHERE project_id = $1`, [projectId]);
     await query(`DELETE FROM workflows WHERE project_id = $1`, [projectId]);
@@ -177,7 +315,14 @@ export class KnowledgeBuilder {
       try {
         aiKnowledge = await KnowledgeExtractor.extract({
           pages: pagesList.map(p => ({ url: p.url, title: p.title, aiSummary: p.aiSummary })),
-          elements: elementsList.map(e => ({ pageUrl: pagesList.find(p => p.id === e.pageId)?.url || '', type: e.type, label: e.label, selector: e.selector, aiDescription: e.aiDescription, confidence: e.confidence }))
+          elements: elementsList.map(e => ({
+            pageUrl: pagesList.find(p => p.id === e.pageId)?.url || '',
+            type: e.type,
+            label: e.label,
+            selector: e.selector,
+            aiDescription: e.aiDescription,
+            confidence: e.confidence
+          }))
         });
       } catch (err: any) {
         console.warn(`[KnowledgeBuilder] AI knowledge extraction failed for project ${projectId}: ${err?.message || err}`);
@@ -261,12 +406,17 @@ export class KnowledgeBuilder {
            RETURNING id`,
           [workflowId, projectId, wf.name, wf.confidence]
         );
-        savedWorkflows.push({ id: insertWfRes.rows[0].id, projectId, name: wf.name, confidence: wf.confidence });
+        const dbWfId = insertWfRes.rows[0].id;
+        savedWorkflows.push({ id: dbWfId, projectId, name: wf.name, confidence: wf.confidence });
 
+        const flowEntities: string[] = [];
         let stepNumber = 1;
         for (const step of wf.steps) {
           const stepPage = step.pageUrl ? pagesList.find(p => p.url === step.pageUrl) : undefined;
           const stepEntity = step.entityName ? findEntity(step.entityName) : undefined;
+          if (stepEntity?.name) {
+            flowEntities.push(stepEntity.name);
+          }
           const stepAction = stepEntity && step.actionType
             ? savedActions.find(a => a.entityId === stepEntity.id && a.actionType.toLowerCase() === step.actionType!.toLowerCase())
             : undefined;
@@ -275,17 +425,23 @@ export class KnowledgeBuilder {
           await query(
             `INSERT INTO workflow_steps (id, workflow_id, step_number, page_id, action_id, entity_id)
              VALUES ($1, $2, $3, $4, $5, $6)`,
-            [stepId, workflowId, stepNumber, stepPage?.id || null, stepAction?.id || null, stepEntity?.id || null]
+            [stepId, dbWfId, stepNumber, stepPage?.id || null, stepAction?.id || null, stepEntity?.id || null]
           );
           savedSteps.push({
             id: stepId,
-            workflowId,
+            workflowId: dbWfId,
             stepNumber: stepNumber++,
             pageId: stepPage?.id || null,
             actionId: stepAction?.id || null,
             entityId: stepEntity?.id || null
           });
         }
+
+        workflowSummaryList.push({
+          name: wf.name,
+          confidence: wf.confidence,
+          flowEntities
+        });
       }
     } else {
       console.warn(`[KnowledgeBuilder] No AI knowledge extracted for project ${projectId} -- entities/actions/relationships/workflows left empty.`);
@@ -303,5 +459,12 @@ export class KnowledgeBuilder {
     });
 
     console.log(`Knowledge building and graph projection completed for project: ${projectId}`);
+
+    return {
+      projectId,
+      pageCount: pagesList.length,
+      entities: savedEntities,
+      workflows: workflowSummaryList
+    };
   }
 }
