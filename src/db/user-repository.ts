@@ -1,207 +1,183 @@
-import { query } from '../config/database';
-import { User, NewUser, UserAuthLog, NewAuthLog, UserAuthStats, AuthProvider, AuthEventType } from './schema';
-import { v4 as uuidv4 } from 'uuid';
+import { fn, col } from 'sequelize';
+import { sequelize } from '../config/sequelize';
+import { User, UserProvider } from './models/user.model';
+import { UserAuthLog, AuthEventType } from './models/user-auth-log.model';
+import { ConflictError } from '../errors/api-error';
+import './models/index';
 
-export interface UpsertUserResult {
-  user: User;
-  isNewUser: boolean;
-  logId: string;
+export interface RequestMeta {
+  ipAddress: string | null;
+  userAgent: string | null;
+}
+
+export interface OAuthProfile {
+  provider: 'google' | 'github';
+  providerId: string;
+  email: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
+export interface UserAuthStats {
+  totalUsers: number;
+  totalSignups: number;
+  totalLogins: number;
+  providerBreakdown: Record<string, number>;
+  recentLogins: UserAuthLog[];
 }
 
 export class UserRepository {
-  /**
-   * Upserts a user from Google, GitHub, or Demo OAuth.
-   * Automatically records a SIGNUP event if the user is newly registered,
-   * or a LOGIN event if the user already existed.
-   */
-  public static async upsertUser(
-    userData: NewUser,
-    eventMeta?: { ipAddress?: string | null; userAgent?: string | null; metadata?: Record<string, any> | null }
-  ): Promise<UpsertUserResult> {
-    const existingRes = await query(`SELECT * FROM users WHERE email = $1`, [userData.email]);
-    const now = new Date();
-    let user: User;
-    let isNewUser = false;
-    let eventType: AuthEventType = 'LOGIN';
-
-    if (existingRes.rowCount === 0) {
-      isNewUser = true;
-      eventType = 'SIGNUP';
-      const newId = userData.id || uuidv4();
-
-      const insertRes = await query(
-        `INSERT INTO users (id, email, name, avatar_url, provider, provider_user_id, role, last_login_at, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-         RETURNING *`,
-        [
-          newId,
-          userData.email,
-          userData.name,
-          userData.avatarUrl || null,
-          userData.provider,
-          userData.providerUserId || null,
-          userData.role || 'user',
-          now,
-          now
-        ]
-      );
-      user = this.mapUser(insertRes.rows[0]);
-    } else {
-      const existingUser = existingRes.rows[0];
-      const updateRes = await query(
-        `UPDATE users
-         SET name = COALESCE($1, name),
-             avatar_url = COALESCE($2, avatar_url),
-             provider = $3,
-             provider_user_id = COALESCE($4, provider_user_id),
-             last_login_at = $5,
-             updated_at = $5
-         WHERE id = $6
-         RETURNING *`,
-        [
-          userData.name,
-          userData.avatarUrl || null,
-          userData.provider,
-          userData.providerUserId || null,
-          now,
-          existingUser.id
-        ]
-      );
-      user = this.mapUser(updateRes.rows[0]);
-    }
-
-    // Record authentication audit log entry
-    const logId = uuidv4();
-    await query(
-      `INSERT INTO user_auth_logs (id, user_id, event_type, provider, ip_address, user_agent, metadata, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [
-        logId,
-        user.id,
-        eventType,
-        user.provider,
-        eventMeta?.ipAddress || null,
-        eventMeta?.userAgent || null,
-        eventMeta?.metadata ? JSON.stringify(eventMeta.metadata) : null,
-        now
-      ]
-    );
-
-    return { user, isNewUser, logId };
+  static findByEmail(email: string): Promise<User | null> {
+    return User.findOne({ where: { email } });
   }
 
-  /**
-   * Retrieves a user by their unique email.
-   */
-  public static async getUserByEmail(email: string): Promise<User | null> {
-    const res = await query(`SELECT * FROM users WHERE email = $1`, [email]);
-    return res.rowCount && res.rowCount > 0 ? this.mapUser(res.rows[0]) : null;
+  static findById(id: string): Promise<User | null> {
+    return User.findByPk(id);
   }
 
-  /**
-   * Retrieves a user by their UUID.
-   */
-  public static async getUserById(id: string): Promise<User | null> {
-    const res = await query(`SELECT * FROM users WHERE id = $1`, [id]);
-    return res.rowCount && res.rowCount > 0 ? this.mapUser(res.rows[0]) : null;
-  }
-
-  /**
-   * Lists all users sorted by most recent login.
-   */
-  public static async getUsers(limit = 50, offset = 0): Promise<{ users: User[]; total: number }> {
-    const countRes = await query(`SELECT COUNT(*) FROM users`);
-    const total = parseInt(countRes.rows[0].count, 10);
-
-    const rowsRes = await query(
-      `SELECT * FROM users ORDER BY last_login_at DESC NULLS LAST, created_at DESC LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
-    const users = rowsRes.rows.map(r => this.mapUser(r));
-    return { users, total };
-  }
-
-  /**
-   * Retrieves recent authentication audit logs joined with user details.
-   */
-  public static async getAuthLogs(limit = 100): Promise<Array<UserAuthLog & { userEmail: string; userName: string }>> {
-    const res = await query(
-      `SELECT l.*, u.email as user_email, u.name as user_name
-       FROM user_auth_logs l
-       JOIN users u ON u.id = l.user_id
-       ORDER BY l.created_at DESC
-       LIMIT $1`,
-      [limit]
-    );
-
-    return res.rows.map(r => ({
-      id: r.id,
-      userId: r.user_id,
-      eventType: r.event_type as AuthEventType,
-      provider: r.provider as AuthProvider,
-      ipAddress: r.ip_address,
-      userAgent: r.user_agent,
-      metadata: r.metadata,
-      createdAt: new Date(r.created_at),
-      userEmail: r.user_email,
-      userName: r.user_name
-    }));
-  }
-
-  /**
-   * Computes high-level user and authentication analytics.
-   */
-  public static async getStats(): Promise<UserAuthStats> {
-    const userCountRes = await query(`SELECT COUNT(*) FROM users`);
-    const totalUsers = parseInt(userCountRes.rows[0].count, 10);
-
-    const signupCountRes = await query(
-      `SELECT COUNT(*) FROM user_auth_logs WHERE event_type = 'SIGNUP'`
-    );
-    const totalSignups = parseInt(signupCountRes.rows[0].count, 10);
-
-    const loginCountRes = await query(
-      `SELECT COUNT(*) FROM user_auth_logs WHERE event_type = 'LOGIN'`
-    );
-    const totalLogins = parseInt(loginCountRes.rows[0].count, 10);
-
-    const providerRes = await query(
-      `SELECT provider, COUNT(*) as count FROM users GROUP BY provider`
-    );
-    const providerBreakdown: Record<AuthProvider, number> = {
-      google: 0,
-      github: 0,
-      demo: 0
-    };
-    for (const r of providerRes.rows) {
-      if (r.provider in providerBreakdown) {
-        providerBreakdown[r.provider as AuthProvider] = parseInt(r.count, 10);
+  /** Signup via email+password. Atomically creates the user row and its SIGNUP audit log. */
+  static async createLocalUser(input: { email: string; name: string; passwordHash: string }, meta: RequestMeta): Promise<User> {
+    return sequelize.transaction(async t => {
+      const existing = await User.findOne({ where: { email: input.email }, transaction: t });
+      if (existing) {
+        throw new ConflictError('An account with this email already exists.');
       }
-    }
 
-    const recentLogs = await this.getAuthLogs(10);
+      const user = await User.create(
+        {
+          email: input.email,
+          name: input.name,
+          avatarUrl: null,
+          provider: 'local' as UserProvider,
+          providerUserId: null,
+          passwordHash: input.passwordHash,
+          userType: 'loggedin',
+          emailVerifiedAt: null,
+          lastLoginAt: new Date()
+        },
+        { transaction: t }
+      );
 
-    return {
-      totalUsers,
-      totalSignups,
-      totalLogins,
-      providerBreakdown,
-      recentLogins: recentLogs
-    };
+      await UserAuthLog.create(
+        { userId: user.id, eventType: 'SIGNUP', provider: 'local', ipAddress: meta.ipAddress, userAgent: meta.userAgent, metadata: null },
+        { transaction: t }
+      );
+
+      return user;
+    });
   }
 
-  private static mapUser(row: any): User {
-    return {
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      avatarUrl: row.avatar_url,
-      provider: row.provider as AuthProvider,
-      providerUserId: row.provider_user_id,
-      role: row.role,
-      lastLoginAt: row.last_login_at ? new Date(row.last_login_at) : null,
-      createdAt: new Date(row.created_at),
-      updatedAt: new Date(row.updated_at)
-    };
+  /** Records a successful email+password login. Atomically updates last_login_at and logs it. */
+  static async recordLocalLogin(user: User, meta: RequestMeta): Promise<void> {
+    await sequelize.transaction(async t => {
+      await user.update({ lastLoginAt: new Date() }, { transaction: t });
+      await UserAuthLog.create(
+        { userId: user.id, eventType: 'LOGIN', provider: 'local', ipAddress: meta.ipAddress, userAgent: meta.userAgent, metadata: null },
+        { transaction: t }
+      );
+    });
+  }
+
+  /**
+   * Finds-or-creates a user from a server-verified Google/GitHub profile, linking to an
+   * existing account with the same email if one exists (e.g. it was created via password
+   * signup first). Atomically updates/creates the user and writes the SIGNUP/LOGIN audit
+   * log in one transaction, replacing the old unverified upsertUser/sync flow.
+   */
+  static async loginOrSignupOAuthUser(profile: OAuthProfile, meta: RequestMeta): Promise<{ user: User; isNewUser: boolean }> {
+    return sequelize.transaction(async t => {
+      const idWhere = profile.provider === 'google' ? { googleId: profile.providerId } : { githubId: profile.providerId };
+      let user = await User.findOne({ where: idWhere, transaction: t });
+      let isNewUser = false;
+
+      if (!user) {
+        user = await User.findOne({ where: { email: profile.email }, transaction: t });
+      }
+
+      if (user) {
+        const linkUpdate = profile.provider === 'google' ? { googleId: profile.providerId } : { githubId: profile.providerId };
+        await user.update(
+          { ...linkUpdate, lastLoginAt: new Date(), avatarUrl: profile.avatarUrl ?? user.avatarUrl },
+          { transaction: t }
+        );
+      } else {
+        isNewUser = true;
+        user = await User.create(
+          {
+            email: profile.email,
+            name: profile.name,
+            avatarUrl: profile.avatarUrl,
+            provider: profile.provider,
+            providerUserId: profile.providerId,
+            googleId: profile.provider === 'google' ? profile.providerId : null,
+            githubId: profile.provider === 'github' ? profile.providerId : null,
+            userType: 'loggedin',
+            emailVerifiedAt: new Date(),
+            lastLoginAt: new Date()
+          },
+          { transaction: t }
+        );
+      }
+
+      await UserAuthLog.create(
+        {
+          userId: user.id,
+          eventType: isNewUser ? 'SIGNUP' : 'LOGIN',
+          provider: profile.provider,
+          ipAddress: meta.ipAddress,
+          userAgent: meta.userAgent,
+          metadata: null
+        },
+        { transaction: t }
+      );
+
+      return { user, isNewUser };
+    });
+  }
+
+  static async updatePasswordHash(userId: string, passwordHash: string): Promise<void> {
+    await User.update({ passwordHash }, { where: { id: userId } });
+  }
+
+  static async markEmailVerified(userId: string): Promise<void> {
+    await User.update({ emailVerifiedAt: new Date() }, { where: { id: userId } });
+  }
+
+  static async logEvent(userId: string, eventType: AuthEventType, provider: string, meta: RequestMeta): Promise<void> {
+    await UserAuthLog.create({ userId, eventType, provider, ipAddress: meta.ipAddress, userAgent: meta.userAgent, metadata: null });
+  }
+
+  static async getUsers(limit: number, offset: number): Promise<{ total: number; users: User[] }> {
+    const { count, rows } = await User.findAndCountAll({
+      limit,
+      offset,
+      order: [['lastLoginAt', 'DESC']]
+    });
+    return { total: count, users: rows };
+  }
+
+  static getAuthLogs(limit: number): Promise<UserAuthLog[]> {
+    return UserAuthLog.findAll({
+      include: [{ model: User, as: 'user', attributes: ['email', 'name'] }],
+      order: [['createdAt', 'DESC']],
+      limit
+    });
+  }
+
+  static async getStats(): Promise<UserAuthStats> {
+    const [totalUsers, totalSignups, totalLogins, providerRows, recentLogins] = await Promise.all([
+      User.count(),
+      UserAuthLog.count({ where: { eventType: 'SIGNUP' } }),
+      UserAuthLog.count({ where: { eventType: 'LOGIN' } }),
+      User.findAll({ attributes: ['provider', [fn('COUNT', col('id')), 'count']], group: ['provider'], raw: true }),
+      UserRepository.getAuthLogs(10)
+    ]);
+
+    const providerBreakdown: Record<string, number> = {};
+    for (const row of providerRows as unknown as Array<{ provider: string; count: string }>) {
+      providerBreakdown[row.provider] = Number(row.count);
+    }
+
+    return { totalUsers, totalSignups, totalLogins, providerBreakdown, recentLogins };
   }
 }

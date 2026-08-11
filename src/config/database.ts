@@ -1,12 +1,8 @@
 import { Pool } from 'pg';
-import dotenv from 'dotenv';
-
-dotenv.config();
-
-const connectionString = process.env.DATABASE_URL || 'postgresql://crawler_user:crawler_password@localhost:5432/crawler_db';
+import { env } from './env';
 
 export const pool = new Pool({
-  connectionString,
+  connectionString: env.databaseUrl,
   ssl: false
 });
 

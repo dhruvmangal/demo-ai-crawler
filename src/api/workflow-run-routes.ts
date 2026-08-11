@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
-import { query } from '../config/database';
+import { Workflow, WorkflowRun } from '../db/models';
+import { asyncHandler } from '../middleware/async-handler';
+import { ok } from '../utils/response-envelope';
+import { NotFoundError } from '../errors/api-error';
 
 /**
  * POST /:workflowId/run (mounted at /api/workflows in crawler-app, and again in the
@@ -10,27 +13,25 @@ import { query } from '../config/database';
  */
 export const workflowRunRouter = Router();
 
-workflowRunRouter.post('/:workflowId/run', async (req: Request, res: Response) => {
-  const { workflowId } = req.params;
+workflowRunRouter.post(
+  '/:workflowId/run',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { workflowId } = req.params;
 
-  try {
-    const workflowRes = await query(`SELECT id, project_id FROM workflows WHERE id = $1`, [workflowId]);
-    if (workflowRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Workflow not found' });
+    const workflow = await Workflow.findByPk(workflowId);
+    if (!workflow) {
+      throw new NotFoundError('Workflow not found');
     }
 
-    const runRes = await query(
-      `INSERT INTO workflow_runs (workflow_id, project_id, status)
-       VALUES ($1, $2, 'PENDING')
-       RETURNING id, workflow_id, project_id, status, created_at`,
-      [workflowId, workflowRes.rows[0].project_id]
-    );
+    const run = await WorkflowRun.create({ workflowId, projectId: workflow.projectId, status: 'PENDING' });
 
-    return res.status(201).json({
-      message: 'Workflow recording queued successfully',
-      run: runRes.rows[0]
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+    return ok(
+      res,
+      {
+        message: 'Workflow recording queued successfully',
+        run: { id: run.id, workflow_id: run.workflowId, project_id: run.projectId, status: run.status, created_at: run.createdAt }
+      },
+      201
+    );
+  })
+);

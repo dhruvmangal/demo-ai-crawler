@@ -1,4 +1,6 @@
 // Thin client for the crawler-app REST API (see src/api/routes.ts in the main service).
+import { AuthService } from './auth';
+
 export const API_BASE = 'http://localhost:3000/api';
 export const RECORDINGS_BASE = 'http://localhost:3000/recordings';
 
@@ -39,16 +41,62 @@ export interface WorkflowRun {
   error_message?: string | null;
 }
 
+interface Envelope<T> {
+  success: boolean;
+  data?: T;
+  error?: { code: string; message: string; details?: unknown };
+}
+
+/** Unwraps the {success,data}/{success,error} envelope every API response is now wrapped in. */
 async function asJson<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`${res.status} ${res.statusText}${body ? `: ${body}` : ''}`);
+  let body: Envelope<T> | undefined;
+  try {
+    body = (await res.json()) as Envelope<T>;
+  } catch {
+    // fall through to status-based error below
   }
-  return res.json() as Promise<T>;
+
+  if (!res.ok || !body || !body.success) {
+    const message = body?.error?.message || `${res.status} ${res.statusText}`;
+    throw new Error(message);
+  }
+
+  return body.data as T;
+}
+
+/**
+ * fetch() wrapper that attaches the stored access token and retries exactly once after a
+ * silent AuthService.refreshSession() on a 401, mirroring public/admin/auth.js's
+ * authorizedFetch pattern (adapted for chrome.storage.local instead of localStorage).
+ */
+async function authorizedFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const token = await AuthService.getValidAccessToken();
+  if (!token) {
+    throw new Error('Not logged in.');
+  }
+
+  const withAuth = (t: string): RequestInit => ({
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${t}` }
+  });
+
+  let res = await fetch(url, withAuth(token));
+  if (res.status === 401) {
+    const refreshed = await AuthService.refreshSession();
+    if (!refreshed) {
+      throw new Error('Session expired. Please log in again.');
+    }
+    const newToken = await AuthService.getValidAccessToken();
+    if (!newToken) {
+      throw new Error('Session expired. Please log in again.');
+    }
+    res = await fetch(url, withAuth(newToken));
+  }
+  return res;
 }
 
 export async function startCrawl(targetUrl: string): Promise<CrawlJob> {
-  const res = await fetch(`${API_BASE}/crawl`, {
+  const res = await authorizedFetch(`${API_BASE}/crawl`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ targetUrl })
@@ -58,23 +106,23 @@ export async function startCrawl(targetUrl: string): Promise<CrawlJob> {
 }
 
 export async function getCrawlJob(id: string): Promise<CrawlJob> {
-  const res = await fetch(`${API_BASE}/crawl/${id}`);
+  const res = await authorizedFetch(`${API_BASE}/crawl/${id}`);
   return asJson<CrawlJob>(res);
 }
 
 export async function getGraph(projectId: string): Promise<GraphResponse> {
-  const res = await fetch(`${API_BASE}/graph/${projectId}`);
+  const res = await authorizedFetch(`${API_BASE}/graph/${projectId}`);
   return asJson<GraphResponse>(res);
 }
 
 export async function runWorkflow(workflowId: string): Promise<WorkflowRun> {
-  const res = await fetch(`${API_BASE}/workflows/${workflowId}/run`, { method: 'POST' });
+  const res = await authorizedFetch(`${API_BASE}/workflows/${workflowId}/run`, { method: 'POST' });
   const data = await asJson<{ run: WorkflowRun }>(res);
   return data.run;
 }
 
 export async function getWorkflowRun(id: string): Promise<WorkflowRun> {
-  const res = await fetch(`${API_BASE}/workflow-runs/${id}`);
+  const res = await authorizedFetch(`${API_BASE}/workflow-runs/${id}`);
   return asJson<WorkflowRun>(res);
 }
 
@@ -107,7 +155,7 @@ export async function submitCredentials(
   username: string,
   password: string
 ): Promise<{ message: string }> {
-  const res = await fetch(`${API_BASE}/crawl/${jobId}/credentials`, {
+  const res = await authorizedFetch(`${API_BASE}/crawl/${jobId}/credentials`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password })

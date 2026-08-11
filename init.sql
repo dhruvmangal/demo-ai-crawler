@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS workflows (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- type distinguishes AI-extracted CRUD flows from the one synthetic, always-present
+-- "tour every crawled page" workflow KnowledgeBuilder creates per project -- see
+-- src/knowledge/knowledge-builder.ts. Extraction is CRUD-tuned and routinely finds zero
+-- EXTRACTED workflows for marketing/docs sites, so TOUR is what guarantees every project
+-- has at least one recordable workflow.
+ALTER TABLE workflows ADD COLUMN IF NOT EXISTS type VARCHAR(20) NOT NULL DEFAULT 'EXTRACTED';
+
 -- workflow_steps
 CREATE TABLE IF NOT EXISTS workflow_steps (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

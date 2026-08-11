@@ -1,6 +1,7 @@
 import path from 'path';
 import { Worker } from 'worker_threads';
-import { query } from '../config/database';
+import { sequelize } from '../config/sequelize';
+import { WorkflowRun } from '../db/models';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -13,10 +14,10 @@ const POLL_INTERVAL_MS = 5000;
 const RECORDING_CONCURRENCY = Math.max(1, Number(process.env.RECORDING_CONCURRENCY) || 2);
 let activeWorkers = 0;
 
-function recordRun(run: { id: string; workflow_id: string }): Promise<void> {
+function recordRun(run: { id: string; workflowId: string }): Promise<void> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(path.join(__dirname, 'recording-worker-thread.js'), {
-      workerData: { runId: run.id, workflowId: run.workflow_id }
+      workerData: { runId: run.id, workflowId: run.workflowId }
     });
     worker.once('message', (msg: { ok: boolean; error?: string }) => {
       if (msg.ok) resolve();
@@ -29,30 +30,39 @@ function recordRun(run: { id: string; workflow_id: string }): Promise<void> {
   });
 }
 
+/**
+ * Atomically claims the oldest PENDING run (Sequelize's lock+skipLocked, the ORM
+ * equivalent of `SELECT ... FOR UPDATE SKIP LOCKED`) so multiple worker replicas never
+ * grab the same run.
+ */
+async function claimNextRun(): Promise<WorkflowRun | null> {
+  return sequelize.transaction(async t => {
+    const run = await WorkflowRun.findOne({
+      where: { status: 'PENDING' },
+      order: [['createdAt', 'ASC']],
+      lock: t.LOCK.UPDATE,
+      skipLocked: true,
+      transaction: t
+    });
+    if (!run) {
+      return null;
+    }
+    await run.update({ status: 'RUNNING', startedAt: new Date() }, { transaction: t });
+    return run;
+  });
+}
+
 async function processNextRun() {
   if (activeWorkers >= RECORDING_CONCURRENCY) {
     return; // no room this tick -- the poll loop retries in POLL_INTERVAL_MS
   }
 
-  const selectRes = await query(
-    `UPDATE workflow_runs
-     SET status = 'RUNNING', started_at = CURRENT_TIMESTAMP
-     WHERE id = (
-       SELECT id FROM workflow_runs
-       WHERE status = 'PENDING'
-       ORDER BY created_at ASC
-       LIMIT 1
-       FOR UPDATE SKIP LOCKED
-     )
-     RETURNING id, workflow_id`
-  );
-
-  if (selectRes.rowCount === 0) {
+  const run = await claimNextRun();
+  if (!run) {
     return;
   }
 
-  const run = selectRes.rows[0];
-  console.log(`[Workflow Agent] Recording run ${run.id} for workflow ${run.workflow_id}`);
+  console.log(`[Workflow Agent] Recording run ${run.id} for workflow ${run.workflowId}`);
 
   activeWorkers++;
   recordRun(run)
@@ -72,7 +82,7 @@ async function run() {
     } catch (e) {
       console.error('[Workflow Agent] Polling error:', e);
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 }
 

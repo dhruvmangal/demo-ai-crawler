@@ -1,69 +1,31 @@
 import { UserRepository } from './user-repository';
 import { runMigrations } from './migrate';
+import { hashPassword } from '../auth/password';
+import { ConflictError } from '../errors/api-error';
+
+const DEMO_EMAIL = 'demo-analyst@narreto.io';
 
 export async function seedDatabase(): Promise<void> {
-  console.log('--- SEEDING DATABASE WITH AUTH USERS & LOGS ---');
-
-  // Ensure migrations are run first
+  console.log('--- SEEDING DATABASE ---');
   await runMigrations();
 
-  // Seed Google User
-  const googleUser = await UserRepository.upsertUser(
-    {
-      email: 'alex.mercer@cybernet.ai',
-      name: 'Alex Mercer (Google)',
-      avatarUrl: 'https://lh3.googleusercontent.com/a/default-user=s96-c',
-      provider: 'google',
-      providerUserId: 'google_oauth_sub_10928374',
-      role: 'admin'
-    },
-    {
-      ipAddress: '127.0.0.1',
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0 Safari/537.36',
-      metadata: { scope: 'openid email profile', authMethod: 'chrome.identity' }
+  // The superadmin bootstrap account is seeded by migration 00009 from
+  // SUPERADMIN_EMAIL/SUPERADMIN_PASSWORD, not here -- see src/db/migrations.
+  const meta = { ipAddress: '127.0.0.1', userAgent: 'seed-script' };
+  try {
+    const passwordHash = await hashPassword('Demo1234!');
+    const demoUser = await UserRepository.createLocalUser({ email: DEMO_EMAIL, name: 'Narreto Demo Analyst', passwordHash }, meta);
+    console.log(`[Seed] Created demo user: ${demoUser.email} (password: Demo1234!)`);
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      console.log(`[Seed] Demo user ${DEMO_EMAIL} already exists, skipping.`);
+    } else {
+      throw err;
     }
-  );
-  console.log(`[Seed] Seeded Google user: ${googleUser.user.email} (isNew: ${googleUser.isNewUser})`);
+  }
 
-  // Seed GitHub User
-  const githubUser = await UserRepository.upsertUser(
-    {
-      email: 'alex-mercer@github.com',
-      name: 'Alex Mercer (GitHub)',
-      avatarUrl: 'https://avatars.githubusercontent.com/u/9919?v=4',
-      provider: 'github',
-      providerUserId: 'github_oauth_id_88291034',
-      role: 'user'
-    },
-    {
-      ipAddress: '127.0.0.1',
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0 Safari/537.36',
-      metadata: { scope: 'read:user user:email', authMethod: 'chrome.identity' }
-    }
-  );
-  console.log(`[Seed] Seeded GitHub user: ${githubUser.user.email} (isNew: ${githubUser.isNewUser})`);
-
-  // Seed Demo User
-  const demoUser = await UserRepository.upsertUser(
-    {
-      email: 'demo-analyst@narreto.io',
-      name: 'Narreto Demo Analyst',
-      avatarUrl: null,
-      provider: 'demo',
-      providerUserId: 'demo_user_001',
-      role: 'user'
-    },
-    {
-      ipAddress: '127.0.0.1',
-      userAgent: 'NarretoExtension/1.0.0',
-      metadata: { source: 'local_sandbox' }
-    }
-  );
-  console.log(`[Seed] Seeded Demo user: ${demoUser.user.email} (isNew: ${demoUser.isNewUser})`);
-
-  // Print summary statistics
   const stats = await UserRepository.getStats();
-  console.log('\n--- SEEDING COMPLETED SUCCESSFULLY ---');
+  console.log('\n--- SEEDING COMPLETED ---');
   console.log(`Total Users in DB: ${stats.totalUsers}`);
   console.log(`Total Signups Recorded: ${stats.totalSignups}`);
   console.log(`Total Logins Recorded: ${stats.totalLogins}`);
@@ -73,7 +35,7 @@ export async function seedDatabase(): Promise<void> {
 if (require.main === module) {
   seedDatabase()
     .then(() => process.exit(0))
-    .catch((err) => {
+    .catch(err => {
       console.error('Seeding failed:', err);
       process.exit(1);
     });

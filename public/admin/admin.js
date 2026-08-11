@@ -79,18 +79,12 @@ function pct(value) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url);
+  const res = await AdminAuth.authorizedFetch(url);
   if (!res.ok) {
-    let message = `${res.status} ${res.statusText}`;
-    try {
-      const body = await res.json();
-      if (body && body.error) message = body.error;
-    } catch (_) {
-      /* non-JSON error body */
-    }
-    throw new Error(message);
+    throw new Error(await AdminAuth.parseErrorMessage(res));
   }
-  return res.json();
+  const body = await res.json();
+  return body.data;
 }
 
 function definitionList(pairs, className) {
@@ -704,10 +698,9 @@ async function queueRun(workflowId, button) {
   button.disabled = true;
   button.textContent = 'Queueing…';
   try {
-    const res = await fetch(`/api/workflows/${workflowId}/run`, { method: 'POST' });
+    const res = await AdminAuth.authorizedFetch(`/api/workflows/${workflowId}/run`, { method: 'POST' });
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || `${res.status} ${res.statusText}`);
+      throw new Error(await AdminAuth.parseErrorMessage(res));
     }
     await loadDetail();
   } catch (err) {
@@ -776,7 +769,11 @@ function renderRecordings(panel, detail) {
 
     const head = el('div', 'workflow-head');
     head.appendChild(el('span', 'workflow-name', workflow.name));
-    head.appendChild(el('span', 'chip chip-meta', `confidence ${pct(workflow.confidence)}`));
+    head.appendChild(el(
+      'span',
+      'chip chip-meta',
+      workflow.type === 'TOUR' ? 'full site tour' : `confidence ${pct(workflow.confidence)}`
+    ));
     const button = el('button', 'btn', 'Record video');
     button.type = 'button';
     button.addEventListener('click', () => queueRun(workflow.id, button));

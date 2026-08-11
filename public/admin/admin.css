@@ -125,6 +125,30 @@ button {
   white-space: nowrap;
 }
 
+.admin-session {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.admin-session button {
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: inherit;
+  cursor: pointer;
+}
+
+.admin-session button:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
 /* ---------- layout ---------- */
 
 .layout {

@@ -1,34 +1,11 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { Page } from 'playwright';
-import { BROWSER_TOOLS, executeBrowserTool } from './browser-tools';
-import { SafetyEngine } from '../safety/safety-engine';
-import { StepMetadata } from '../types/workflow-scripts';
+import { OllamaClient } from '../llm/ollama-client';
+import { UiDiscovery } from '../discovery/ui-discovery';
+import { buildActionForElement, ActionContext } from './deterministic-script-engine';
+import { KnowledgeUiElement, StepMetadata } from '../types/workflow-scripts';
 
-const MODEL = 'claude-opus-5';
-const MAX_TOKENS = 4096;
-const MAX_HEAL_ITERATIONS = 6;
-
-let client: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!client) {
-    client = new Anthropic();
-  }
-  return client;
-}
-
-const FINISH_HEAL_TOOL: Anthropic.Tool = {
-  name: 'finish_heal',
-  description: 'Call this when you have either repaired the step or determined it should become a safe no-op.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      code: { type: 'string', description: 'Body of a fixed `async (page, ctx) => { ... }` function, or a no-op if the action can no longer be safely reproduced.' },
-      narration: { type: 'string', description: 'One-sentence, present-tense narration suitable as a video caption.' },
-      diffSummary: { type: 'string', description: 'One-sentence description of what changed and why, for the heal audit trail.' }
-    },
-    required: ['code', 'narration', 'diffSummary']
-  }
-};
+const MAX_ELEMENTS = 40;
+const MAX_ERROR_CHARS = 600;
 
 export interface HealResult {
   code: string;
@@ -36,106 +13,101 @@ export interface HealResult {
   diffSummary: string;
 }
 
+function normalize(elements: Awaited<ReturnType<typeof UiDiscovery.discover>>): KnowledgeUiElement[] {
+  return elements.map((el, i) => ({
+    id: el.id || String(i),
+    type: el.type,
+    label: el.label ?? null,
+    selector: el.selector,
+    role: el.role ?? null,
+    aiDescription: el.aiDescription ?? null
+  }));
+}
+
 /**
  * Repairs one failing step of an already-persisted script, in place, using the same
- * live `page` from the in-progress recording run -- never a second browser context,
- * so the one-browser-per-run video stays continuous. Scope is deliberately narrow:
- * one step, one bounded tool loop (mirrors the retired orchestrator's per-step budget),
- * patching just the failing step rather than regenerating the whole script. Returns
- * null if it can't produce a fix within the iteration budget -- the caller
+ * live `page` from the in-progress recording run -- never a second browser context, so
+ * the one-browser-per-run video stays continuous. Runs entirely against the local Ollama
+ * model (same one crawl-time summarization uses, see src/llm/ollama-client.ts) rather
+ * than Anthropic: no API key, no per-call cost, consistent with
+ * DeterministicScriptEngine's no-LLM-for-generation design -- the only thing genuinely
+ * LLM-shaped left in this pipeline is "which of these live elements is the one the
+ * original step meant", so that's the only thing asked of the model. It answers with an
+ * index into the live element list (never freeform selector text), which
+ * buildActionForElement (shared with DeterministicScriptEngine) then turns into
+ * deterministic, SafetyEngine-checked code exactly the same way generation does --
+ * keeping the LLM's job narrowly "point at the right element", not "write code".
+ * Returns null if the model can't confidently match anything -- the caller
  * (WorkflowRecorder) then lets the original error propagate and the run fails.
  */
 export class ScriptHealer {
   public static async heal(step: StepMetadata, error: Error, page: Page): Promise<HealResult | null> {
-    const contextText = [
+    const rawElements = await UiDiscovery.discover(page);
+    if (rawElements.length === 0) {
+      return null;
+    }
+    // form/table/dialog are containers buildActionForElement will never click directly
+    // (see its own comment) -- excluding them here means the model spends its one pick
+    // on an element that could actually resolve the step, instead of one it's guaranteed
+    // to end up skipping.
+    const candidates = normalize(rawElements)
+      .filter(el => el.type === 'button' || el.type === 'input')
+      .slice(0, MAX_ELEMENTS);
+
+    // UiDiscovery.discover() finds every matching DOM node regardless of whether it's
+    // currently shown (e.g. one "Done" button per collapsed filter dropdown, all sharing
+    // the same class) -- offering a hidden one as a candidate is worse than not offering
+    // it: the model can "successfully" match it and we'd retry the exact same
+    // element-not-visible failure. One isVisible() check per candidate, run in parallel;
+    // a selector that no longer resolves at all (page moved on) counts as not visible too.
+    const visibility = await Promise.all(
+      candidates.map(el => page.locator(el.selector).first().isVisible().catch(() => false))
+    );
+    const elements = candidates.filter((_, i) => visibility[i]);
+    if (elements.length === 0) {
+      return null;
+    }
+
+    const elementsList = elements
+      .map((el, i) => `${i}: [${el.type}] "${el.label || ''}"${el.role ? ` role=${el.role}` : ''} selector=${el.selector}`)
+      .join('\n');
+
+    const knowledgeLine = step.knowledgeContext.actionType
+      ? `Action type: ${step.knowledgeContext.actionType}${step.knowledgeContext.entityName ? ` on ${step.knowledgeContext.entityName}` : ''}`
+      : null;
+
+    const prompt = [
+      'A Playwright automation step just failed while replaying a recorded browser workflow, most likely because the page changed since it was recorded.',
+      '',
       `Original intent: ${step.narration}`,
-      step.knowledgeContext.pageUrl ? `Expected page: ${step.knowledgeContext.pageUrl}` : null,
-      step.knowledgeContext.actionType
-        ? `Action type: ${step.knowledgeContext.actionType}${step.knowledgeContext.entityName ? ` on ${step.knowledgeContext.entityName}` : ''}`
-        : null,
-      `Original code:\n${step.code}`,
-      `Error when this code ran just now: ${error.message}`
+      knowledgeLine,
+      `Original code that failed:\n${step.code}`,
+      `Error:\n${(error.message || String(error)).slice(0, MAX_ERROR_CHARS)}`,
+      `Interactive elements currently on the live page:\n${elementsList}`,
+      '',
+      'Pick the index of the ONE element above that best matches the original intent, or -1 if none of them do.',
+      'Respond with ONLY a JSON object matching this exact shape, no other text:',
+      '{ "elementIndex": <integer index from the list above, or -1> }'
     ]
       .filter(Boolean)
       .join('\n');
 
-    const systemPrompt =
-      'This Playwright script step failed while replaying a recorded workflow, most likely because ' +
-      'a selector went stale. Diagnose why by inspecting the live page (call read_page_elements), ' +
-      'then either (a) find the corrected element and produce fixed code with the same signature ' +
-      '`async (page, ctx) => { ... }`, preserving the original intent, or (b) if the underlying ' +
-      'action now looks unsafe/destructive, produce a no-op with an explanatory narration. Call ' +
-      'finish_heal when done, with a one-sentence diffSummary describing what you changed and why.';
-
-    const messages: Anthropic.MessageParam[] = [{ role: 'user', content: contextText }];
-    let skipped = false;
-
-    for (let i = 0; i < MAX_HEAL_ITERATIONS; i++) {
-      const response = await getClient().messages.create({
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
-        system: systemPrompt,
-        tools: [...BROWSER_TOOLS, FINISH_HEAL_TOOL],
-        messages
-      });
-
-      const toolUseBlocks = response.content.filter(
-        (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
-      );
-      const finishCall = toolUseBlocks.find(b => b.name === 'finish_heal');
-
-      if (finishCall) {
-        const input = finishCall.input as any;
-        const code = skipped
-          ? '// Skipped for safety: the healed action was blocked by SafetyEngine.'
-          : typeof input?.code === 'string'
-            ? input.code
-            : step.code;
-        const narration = typeof input?.narration === 'string' ? input.narration : step.narration;
-        const diffSummary = typeof input?.diffSummary === 'string' ? input.diffSummary : 'Healed step.';
-        return { code, narration, diffSummary };
-      }
-
-      if (toolUseBlocks.length === 0) {
-        return null;
-      }
-
-      messages.push({ role: 'assistant', content: response.content });
-
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
-      for (const call of toolUseBlocks) {
-        try {
-          if (call.name === 'click') {
-            const selector = (call.input as any)?.selector || '';
-            const safetyLabel = [step.knowledgeContext.actionType, step.knowledgeContext.entityName, step.narration]
-              .filter(Boolean)
-              .join(' ');
-            const safety = SafetyEngine.checkAction(safetyLabel || 'Click', selector, step.knowledgeContext.actionType || undefined);
-            if (!safety.safe) {
-              skipped = true;
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: call.id,
-                content: `Blocked for safety: ${safety.reason}`,
-                is_error: true
-              });
-              continue;
-            }
-          }
-          const result = await executeBrowserTool(page, call.name, call.input);
-          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: result });
-        } catch (err: any) {
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: call.id,
-            content: `Error: ${err?.message || err}`,
-            is_error: true
-          });
-        }
-      }
-      messages.push({ role: 'user', content: toolResults });
+    const result = await OllamaClient.generateJson(prompt, { numCtx: 2048 });
+    const index = result && typeof result.elementIndex === 'number' ? Math.trunc(result.elementIndex) : -1;
+    if (index < 0 || index >= elements.length) {
+      return null;
     }
 
-    return null;
+    const ctx: ActionContext = {
+      actionType: step.knowledgeContext.actionType ?? null,
+      entityName: step.knowledgeContext.entityName ?? null
+    };
+    const outcome = buildActionForElement(elements[index], ctx);
+    const narration = `${outcome.narrationPart}.`;
+    const diffSummary = outcome.skipped
+      ? 'Re-matched element was blocked by SafetyEngine; replaced with a no-op.'
+      : `Live-repaired via Ollama: re-matched to "${elements[index].label}" (${elements[index].selector}) after the original selector failed.`;
+
+    return { code: outcome.lines.join('\n'), narration, diffSummary };
   }
 }

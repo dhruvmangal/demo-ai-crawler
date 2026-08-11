@@ -53,14 +53,32 @@ app.innerHTML = `
           CONTINUE WITH GOOGLE
         </button>
 
-        <div class="auth-divider">OR</div>
-
         <button id="github-login-btn" class="hud-button auth-btn auth-btn-github">
           <svg class="auth-icon" viewBox="0 0 24 24">
             <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
           </svg>
           CONTINUE WITH GITHUB
         </button>
+
+        <p id="auth-oauth-message" class="auth-oauth-message hidden"></p>
+
+        <div class="auth-divider">OR EMAIL / PASSWORD</div>
+
+        <form id="auth-password-form" class="auth-password-form">
+          <label class="field-label" for="auth-name">NAME</label>
+          <input id="auth-name" class="hud-input auth-signup-only hidden" type="text" placeholder="Jane Doe" autocomplete="name" />
+          <label class="field-label" for="auth-email">EMAIL</label>
+          <input id="auth-email" class="hud-input" type="email" placeholder="you@example.com" autocomplete="email" required />
+          <label class="field-label" for="auth-password">PASSWORD</label>
+          <input id="auth-password" class="hud-input" type="password" placeholder="••••••••" autocomplete="current-password" required />
+          <p id="auth-password-error" class="error-text hidden"></p>
+          <button id="auth-password-submit" type="submit" class="hud-button">LOG IN</button>
+          <button id="auth-mode-toggle" type="button" class="hud-button hud-button-ghost">NEED AN ACCOUNT? SIGN UP</button>
+        </form>
+
+        <div class="auth-divider">LOCAL DEV ONLY</div>
+        <button id="demo-login-btn" class="hud-button hud-button-ghost auth-btn-demo">TRY DEMO ACCOUNT</button>
+        <p class="auth-demo-note">Logs in as a real seeded backend user (demo-analyst@narreto.io). Not a bypass -- fails if the account isn't seeded.</p>
       </div>
 
       <div id="auth-profile-details" class="profile-card hidden">
@@ -73,7 +91,7 @@ app.innerHTML = `
         </div>
         <div class="profile-metadata">
           <span id="profile-provider-info">PROVIDER: GOOGLE</span>
-          <span id="profile-auth-time">AUTHENTICATED: JUST NOW</span>
+          <span id="profile-verified-info">EMAIL VERIFIED</span>
         </div>
         <button id="logout-btn" class="hud-button hud-button-ghost">SIGN OUT</button>
       </div>
@@ -81,7 +99,7 @@ app.innerHTML = `
     <button id="auth-close-btn" class="hud-button hud-button-ghost">BACK TO DASHBOARD</button>
   </section>
 
-  <section id="view-idle" class="view">
+  <section id="view-idle" class="view hidden">
     <label class="field-label" for="target-url">TARGET URL</label>
     <input id="target-url" class="hud-input" type="url" placeholder="https://example.com" />
     <button id="scan-btn" class="hud-button">INITIATE SCAN</button>
@@ -150,11 +168,20 @@ const els = {
   authProfileDetails: document.getElementById('auth-profile-details')!,
   googleLoginBtn: document.getElementById('google-login-btn')!,
   githubLoginBtn: document.getElementById('github-login-btn')!,
+  authOauthMessage: document.getElementById('auth-oauth-message')!,
+  authPasswordForm: document.getElementById('auth-password-form') as HTMLFormElement,
+  authName: document.getElementById('auth-name') as HTMLInputElement,
+  authEmail: document.getElementById('auth-email') as HTMLInputElement,
+  authPassword: document.getElementById('auth-password') as HTMLInputElement,
+  authPasswordError: document.getElementById('auth-password-error')!,
+  authPasswordSubmit: document.getElementById('auth-password-submit') as HTMLButtonElement,
+  authModeToggle: document.getElementById('auth-mode-toggle') as HTMLButtonElement,
+  demoLoginBtn: document.getElementById('demo-login-btn') as HTMLButtonElement,
   profileAvatar: document.getElementById('profile-avatar') as HTMLImageElement,
   profileName: document.getElementById('profile-name')!,
   profileEmail: document.getElementById('profile-email')!,
   profileProviderInfo: document.getElementById('profile-provider-info')!,
-  profileAuthTime: document.getElementById('profile-auth-time')!,
+  profileVerifiedInfo: document.getElementById('profile-verified-info')!,
   logoutBtn: document.getElementById('logout-btn')!,
   authCloseBtn: document.getElementById('auth-close-btn')!,
   targetUrl: document.getElementById('target-url') as HTMLInputElement,
@@ -253,7 +280,7 @@ function updateUserUI(user: AuthUser | null) {
     els.profileEmail.textContent = user.email;
     els.profileAvatar.src = user.avatarUrl || 'icons/icon48.png';
     els.profileProviderInfo.textContent = `PROVIDER: ${user.provider.toUpperCase()}`;
-    els.profileAuthTime.textContent = `SESSION: ${new Date(user.authenticatedAt).toLocaleTimeString()}`;
+    els.profileVerifiedInfo.textContent = user.emailVerifiedAt ? 'EMAIL VERIFIED' : 'EMAIL NOT VERIFIED';
   } else {
     els.userDisplayName.textContent = 'UNAUTHENTICATED';
     els.authToggleBtn.textContent = 'SIGN IN';
@@ -267,9 +294,21 @@ function updateUserUI(user: AuthUser | null) {
   }
 }
 
+/** True if a scan/workflow action is allowed to proceed; otherwise redirects to the auth view. */
+function requireLogin(): boolean {
+  if (currentUser) return true;
+  showView('auth');
+  return false;
+}
+
 async function initAuth() {
   const user = await AuthService.getStoredUser();
   updateUserUI(user);
+  // Login is required before any crawl/workflow action -- surface the auth view up front
+  // rather than letting the user reach idle/results and only discover the gate on click.
+  // (view-idle/view-auth both start hidden in the static markup to avoid flashing idle
+  // before this async storage read resolves.)
+  showView(user ? 'idle' : 'auth');
 }
 
 async function getActiveTabUrl(): Promise<string> {
@@ -418,14 +457,30 @@ els.authCloseBtn.addEventListener('click', () => {
   showView(previousView);
 });
 
+function showOauthMessage(message: string) {
+  els.authOauthMessage.textContent = message;
+  els.authOauthMessage.classList.remove('hidden');
+}
+
+/** Strips the client-side "NOT_CONFIGURED:" marker AuthService uses to flag an unset OAuth client ID. */
+function isNotConfiguredError(err: any): boolean {
+  return typeof err?.message === 'string' && err.message.startsWith('NOT_CONFIGURED:');
+}
+
+function friendlyOauthError(err: any, fallback: string): string {
+  const message = err?.message || fallback;
+  return isNotConfiguredError(err) ? message.replace(/^NOT_CONFIGURED:\s*/, '') : message;
+}
+
 els.googleLoginBtn.addEventListener('click', async () => {
+  els.authOauthMessage.classList.add('hidden');
   try {
     els.googleLoginBtn.textContent = 'CONNECTING TO GOOGLE…';
     const user = await AuthService.loginWithGoogle();
     updateUserUI(user);
     showView('idle');
   } catch (err: any) {
-    showError(err?.message || 'Google Authentication failed.');
+    showOauthMessage(friendlyOauthError(err, 'Google Authentication failed.'));
   } finally {
     els.googleLoginBtn.innerHTML = `
       <svg class="auth-icon" viewBox="0 0 24 24">
@@ -440,13 +495,14 @@ els.googleLoginBtn.addEventListener('click', async () => {
 });
 
 els.githubLoginBtn.addEventListener('click', async () => {
+  els.authOauthMessage.classList.add('hidden');
   try {
     els.githubLoginBtn.textContent = 'CONNECTING TO GITHUB…';
     const user = await AuthService.loginWithGitHub();
     updateUserUI(user);
     showView('idle');
   } catch (err: any) {
-    showError(err?.message || 'GitHub Authentication failed.');
+    showOauthMessage(friendlyOauthError(err, 'GitHub Authentication failed.'));
   } finally {
     els.githubLoginBtn.innerHTML = `
       <svg class="auth-icon" viewBox="0 0 24 24">
@@ -457,14 +513,103 @@ els.githubLoginBtn.addEventListener('click', async () => {
   }
 });
 
+// Local-dev convenience: logs in against the real backend as a hardcoded seeded demo
+// account (see src/db/seed.ts), via the same /api/auth/login call the password form
+// uses. Not a client-side bypass -- if the account isn't seeded on whatever backend
+// this extension is pointed at, this fails cleanly with "invalid credentials".
+const DEMO_EMAIL = 'demo-analyst@narreto.io';
+const DEMO_PASSWORD = 'Demo1234!';
+
+els.demoLoginBtn.addEventListener('click', async () => {
+  els.authOauthMessage.classList.add('hidden');
+  const originalLabel = els.demoLoginBtn.textContent;
+  els.demoLoginBtn.disabled = true;
+  els.demoLoginBtn.textContent = 'LOGGING IN AS DEMO USER…';
+  try {
+    const user = await AuthService.loginWithPassword(DEMO_EMAIL, DEMO_PASSWORD);
+    updateUserUI(user);
+    showView('idle');
+  } catch (err: any) {
+    showOauthMessage(err?.message || 'Demo login failed. Is the demo account seeded on this backend?');
+  } finally {
+    els.demoLoginBtn.disabled = false;
+    els.demoLoginBtn.textContent = originalLabel;
+  }
+});
+
+// Email/password login + signup, sharing one form and toggled by authMode.
+let authMode: 'login' | 'signup' = 'login';
+
+function setAuthMode(mode: 'login' | 'signup') {
+  authMode = mode;
+  els.authPasswordError.classList.add('hidden');
+  if (mode === 'signup') {
+    els.authName.classList.remove('hidden');
+    els.authName.setAttribute('required', 'true');
+    els.authPasswordSubmit.textContent = 'CREATE ACCOUNT';
+    els.authModeToggle.textContent = 'HAVE AN ACCOUNT? LOG IN';
+    els.authPassword.setAttribute('autocomplete', 'new-password');
+  } else {
+    els.authName.classList.add('hidden');
+    els.authName.removeAttribute('required');
+    els.authPasswordSubmit.textContent = 'LOG IN';
+    els.authModeToggle.textContent = 'NEED AN ACCOUNT? SIGN UP';
+    els.authPassword.setAttribute('autocomplete', 'current-password');
+  }
+}
+
+els.authModeToggle.addEventListener('click', () => {
+  setAuthMode(authMode === 'login' ? 'signup' : 'login');
+});
+
+els.authPasswordForm.addEventListener('submit', async (evt) => {
+  evt.preventDefault();
+  els.authPasswordError.classList.add('hidden');
+  els.authOauthMessage.classList.add('hidden');
+
+  const email = els.authEmail.value.trim();
+  const password = els.authPassword.value;
+  const name = els.authName.value.trim();
+
+  if (!email || !password) return;
+  if (authMode === 'signup' && !name) {
+    els.authPasswordError.textContent = 'Name is required to create an account.';
+    els.authPasswordError.classList.remove('hidden');
+    return;
+  }
+
+  const originalLabel = els.authPasswordSubmit.textContent;
+  els.authPasswordSubmit.disabled = true;
+  els.authPasswordSubmit.textContent = authMode === 'signup' ? 'CREATING ACCOUNT…' : 'LOGGING IN…';
+
+  try {
+    const user =
+      authMode === 'signup'
+        ? await AuthService.signup(email, password, name)
+        : await AuthService.loginWithPassword(email, password);
+    updateUserUI(user);
+    els.authEmail.value = '';
+    els.authPassword.value = '';
+    els.authName.value = '';
+    showView('idle');
+  } catch (err: any) {
+    els.authPasswordError.textContent = err?.message || 'Authentication failed.';
+    els.authPasswordError.classList.remove('hidden');
+  } finally {
+    els.authPasswordSubmit.disabled = false;
+    els.authPasswordSubmit.textContent = originalLabel;
+  }
+});
+
 els.logoutBtn.addEventListener('click', async () => {
   await AuthService.logout();
   updateUserUI(null);
-  showView('idle');
+  showView('auth');
 });
 
 // Crawl & UI Event Handlers
 els.scanBtn.addEventListener('click', () => {
+  if (!requireLogin()) return;
   const url = els.targetUrl.value.trim();
   if (!url) return;
   beginScan(url);
@@ -484,6 +629,7 @@ els.newScanBtn.addEventListener('click', () => {
 });
 
 els.recordBtn.addEventListener('click', () => {
+  if (!requireLogin()) return;
   if (!selectedWorkflowId) return;
   beginRecording(selectedWorkflowId);
 });
@@ -499,6 +645,7 @@ els.recordBackBtn.addEventListener('click', () => {
 });
 
 els.credSubmit.addEventListener('click', async () => {
+  if (!requireLogin()) return;
   if (!currentJob) return;
   const username = els.credUsername.value.trim();
   const password = els.credPassword.value;

@@ -20,6 +20,10 @@
         <input type="checkbox" id="auto-refresh" checked />
         auto-refresh 5s
       </label>
+      <div class="admin-session">
+        <span id="admin-email"></span>
+        <button type="button" id="logout-btn">Log out</button>
+      </div>
     </header>
 
     <main class="layout">
@@ -57,6 +61,13 @@
       </div>
     </template>
 
+    <script src="auth.js"></script>
+    <script>
+      AdminAuth.requireLogin();
+      const admin = AdminAuth.currentAdmin();
+      if (admin) document.getElementById('admin-email').textContent = admin.email;
+      document.getElementById('logout-btn').addEventListener('click', () => AdminAuth.logout());
+    </script>
     <script src="admin.js"></script>
   </body>
 </html>

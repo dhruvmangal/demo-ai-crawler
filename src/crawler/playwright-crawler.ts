@@ -4,6 +4,25 @@ import { NavigationDiscovery, DiscoveredLink } from '../discovery/navigation-dis
 import { UiDiscovery } from '../discovery/ui-discovery';
 import { SafetyEngine } from '../safety/safety-engine';
 import { UiElement } from '../types/pages';
+import { assertSafeUrl, isRequestAllowed } from '../security/ssrf-guard';
+
+/**
+ * The actual SSRF enforcement point: intercepts every request the context makes (not
+ * just top-level navigations) so a redirect landing on a private/internal address is
+ * caught too, not just the URL the caller originally asked for. Must be installed before
+ * any navigation happens on the context.
+ */
+async function installSsrfGuard(context: any): Promise<void> {
+  await context.route('**/*', async (route: any) => {
+    const url = route.request().url();
+    if (await isRequestAllowed(url)) {
+      await route.continue();
+    } else {
+      console.warn(`[SSRF Guard] Blocked request to ${url}`);
+      await route.abort('blockedbyclient');
+    }
+  });
+}
 
 export interface CrawlCredentials {
   username: string;
@@ -79,6 +98,7 @@ export class PlaywrightCrawler {
       console.log(`Connecting over CDP: ${options.connectCdpUrl}`);
       browser = await chromium.connectOverCDP(options.connectCdpUrl);
       context = browser.contexts()[0];
+      await installSsrfGuard(context);
       page = context.pages()[0] || (await context.newPage());
     } else {
       // Launch headless browser locally
@@ -91,6 +111,7 @@ export class PlaywrightCrawler {
         // Can reload state directly
         context = await browser.newContext({ storageState: options.storageStatePath });
       }
+      await installSsrfGuard(context);
       page = await context.newPage();
     }
 
@@ -98,6 +119,11 @@ export class PlaywrightCrawler {
     await page.setViewportSize({ width: 1280, height: 800 });
     page.setDefaultNavigationTimeout(30000);
     page.setDefaultTimeout(10000);
+
+    // Cheap pre-check before seeding the queue -- the context.route() guard installed
+    // above is the check that actually matters (it also catches redirects), this just
+    // fails fast without spinning up navigation at all for an obviously-bad start URL.
+    await assertSafeUrl(options.startUrl);
 
     // Seed the queue
     this.queue.push({ url: options.startUrl });

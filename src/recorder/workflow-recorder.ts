@@ -4,7 +4,8 @@ import fs from 'fs';
 import path from 'path';
 import { StepMetadata, HealAudit } from '../types/workflow-scripts';
 import { buildCaptionText, buildVtt, Cue } from './caption-builder';
-import { ScriptHealer } from '../agent/script-healer';
+import { ScriptHealer, HealResult } from '../agent/script-healer';
+import { isRequestAllowed } from '../security/ssrf-guard';
 
 export interface RecordingResult {
   videoPath: string;
@@ -41,13 +42,33 @@ export class StepExecutionError extends Error {
 export class WorkflowRecorder {
   constructor(private recordingsDir: string) {}
 
-  public async record(runId: string, scriptRow: { id: string; stepMetadata: StepMetadata[] }): Promise<ScriptRecordingResult> {
+  public async record(
+    runId: string,
+    scriptRow: { id: string; stepMetadata: StepMetadata[] },
+    baseUrl?: string
+  ): Promise<ScriptRecordingResult> {
     fs.mkdirSync(this.recordingsDir, { recursive: true });
 
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
       viewport: { width: 1280, height: 720 },
-      recordVideo: { dir: this.recordingsDir, size: { width: 1280, height: 720 } }
+      recordVideo: { dir: this.recordingsDir, size: { width: 1280, height: 720 } },
+      // pages.url (and so every generated step's page.goto target) is stored as a
+      // path, not a full URL -- baseURL is what lets Playwright resolve those against
+      // the site this workflow was actually crawled from.
+      baseURL: baseUrl
+    });
+    // Same SSRF enforcement as the crawler (src/crawler/playwright-crawler.ts) -- this
+    // context replays generated page.goto calls against `baseUrl`, a second, independent
+    // navigation surface driven by the same DB-sourced target_url.
+    await context.route('**/*', async (route: any) => {
+      const url = route.request().url();
+      if (await isRequestAllowed(url)) {
+        await route.continue();
+      } else {
+        console.warn(`[SSRF Guard] Blocked request to ${url}`);
+        await route.abort('blockedbyclient');
+      }
     });
     const page = await context.newPage();
     page.setDefaultNavigationTimeout(30000);
@@ -73,7 +94,19 @@ export class WorkflowRecorder {
         try {
           await WorkflowRecorder.runCompiledStep(page, step.code);
         } catch (err: any) {
-          const healResult = await ScriptHealer.heal(step, err, page);
+          console.warn(`[WorkflowRecorder] Step ${step.stepNumber} threw, attempting heal: ${err?.message || err}`);
+          // ScriptHealer itself drives the live page (UiDiscovery.discover, visibility
+          // checks) and can throw its own transient errors (e.g. a page.evaluate racing
+          // an in-flight navigation) -- letting that escape uncaught would replace the
+          // real, useful step error with a confusing healer-internal one. Treat a
+          // healer crash the same as heal() returning null: this attempt failed, fall
+          // through to the original error.
+          let healResult: HealResult | null = null;
+          try {
+            healResult = await ScriptHealer.heal(step, err, page);
+          } catch (healErr: any) {
+            console.warn(`[WorkflowRecorder] Healer crashed on step ${step.stepNumber}: ${healErr?.message || healErr}`);
+          }
           if (!healResult) {
             throw new StepExecutionError(err?.message || String(err), step.stepNumber);
           }

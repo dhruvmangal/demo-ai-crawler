@@ -12,7 +12,13 @@
 | `OLLAMA_MODEL` | `qwen2.5:3b-instruct` | crawl-worker, `llm` service | model tag to pull and query |
 | `AI_SUMMARIZATION_ENABLED` | `true` | crawl-worker | `false` skips both Ollama call sites entirely — faster crawls, no `llm` dependency, but pages/entities/workflows get no AI enrichment |
 | `RECORDINGS_DIR` | `/usr/src/app/recordings` | crawler-app (serves), workflow-agent-worker (writes) | shared volume for video/captions |
-| `ANTHROPIC_API_KEY` | — | workflow-agent-worker | required for `WorkflowOrchestrator` (Claude agent); read from shell env or `.env` at the Compose level, passed through `${ANTHROPIC_API_KEY:-}` |
+| `OLLAMA_URL` / `OLLAMA_MODEL` | `http://llm:11434` / `qwen2.5:3b-instruct` | workflow-agent-worker | same Ollama server as crawl-worker, used by `ScriptHealer` to re-match a live element when a persisted step's selector breaks |
+
+The app has no Anthropic/Claude dependency anywhere — `ANTHROPIC_API_KEY`
+was removed once `workflow-agent-worker`'s pipeline moved to
+`DeterministicScriptEngine` (no-LLM generation, see
+`features/workflow-recording-agent.md`) + `ScriptHealer` on local Ollama
+(no-LLM-provider-key live repair).
 
 Postgres/Neo4j credentials are also injected as Docker Compose service
 `environment:` for `postgres`/`neo4j` themselves — see `docker-compose.yml`

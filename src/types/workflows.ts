@@ -1,8 +1,11 @@
+export type WorkflowType = 'EXTRACTED' | 'TOUR';
+
 export interface Workflow {
   id?: string;
   projectId: string;
   name: string;
   confidence: number;
+  type?: WorkflowType;
   createdAt?: Date;
 }
 

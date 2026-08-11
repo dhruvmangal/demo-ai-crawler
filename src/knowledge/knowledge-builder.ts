@@ -9,6 +9,9 @@ import { v4 as uuidv4 } from 'uuid';
 
 const AI_SUMMARIZATION_ENABLED = process.env.AI_SUMMARIZATION_ENABLED !== 'false';
 const AI_CONCURRENCY = Math.max(1, Number(process.env.AI_CONCURRENCY) || 3);
+// Caps the synthetic "Full Site Tour" workflow so a large site doesn't produce an
+// unwatchably long recording -- see the TOUR workflow synthesis below.
+const MAX_TOUR_PAGES = 30;
 
 async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
@@ -309,6 +312,34 @@ export class KnowledgeBuilder {
 
     await query(`DELETE FROM entities WHERE project_id = $1`, [projectId]);
     await query(`DELETE FROM workflows WHERE project_id = $1`, [projectId]);
+
+    // Always synthesize one TOUR workflow covering every crawled page, independent of
+    // whether AI entity/action extraction below finds any real (EXTRACTED) workflows --
+    // that extraction is CRUD-tuned and routinely finds none for marketing/docs sites,
+    // which today left those projects with nothing recordable at all. Deliberately kept
+    // out of savedWorkflows/workflowSummaryList/GraphProjection: those feed the
+    // AI-facing business-flow summary and knowledge graph, where a page tour is noise,
+    // not a business workflow.
+    const tourPages = pagesList.slice(0, MAX_TOUR_PAGES);
+    if (pagesList.length > MAX_TOUR_PAGES) {
+      console.warn(`[KnowledgeBuilder] Project ${projectId} has ${pagesList.length} pages -- capping Full Site Tour at ${MAX_TOUR_PAGES}.`);
+    }
+    if (tourPages.length > 0) {
+      const tourWorkflowId = uuidv4();
+      await query(
+        `INSERT INTO workflows (id, project_id, name, confidence, type)
+         VALUES ($1, $2, 'Full Site Tour', 1.0, 'TOUR')`,
+        [tourWorkflowId, projectId]
+      );
+      let tourStepNumber = 1;
+      for (const page of tourPages) {
+        await query(
+          `INSERT INTO workflow_steps (id, workflow_id, step_number, page_id)
+           VALUES ($1, $2, $3, $4)`,
+          [uuidv4(), tourWorkflowId, tourStepNumber++, page.id]
+        );
+      }
+    }
 
     let aiKnowledge = null;
     if (AI_SUMMARIZATION_ENABLED) {

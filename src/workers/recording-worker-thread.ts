@@ -1,6 +1,7 @@
 import { parentPort, workerData } from 'worker_threads';
 import path from 'path';
-import { query, pool } from '../config/database';
+import { sequelize } from '../config/sequelize';
+import { WorkflowRun, CrawlJob } from '../db/models';
 import { WorkflowKnowledge } from '../agent/workflow-knowledge';
 import { DeterministicScriptEngine } from '../agent/deterministic-script-engine';
 import { WorkflowRecorder, StepExecutionError } from '../recorder/workflow-recorder';
@@ -28,8 +29,8 @@ interface RecordingWorkerData {
  * WorkflowRecorder -- which itself heals a step in place (via the LLM-based ScriptHealer)
  * if its compiled code throws against the live page. Spawned as its own
  * worker_threads Worker by workflow-agent-worker.ts so the poller isn't blocked while
- * this runs; gets its own pg Pool (module state isn't shared across threads) and closes
- * it before exiting so the thread actually terminates.
+ * this runs; gets its own Sequelize connection (module state isn't shared across
+ * threads) and closes it before exiting so the thread actually terminates.
  */
 async function main() {
   const { runId, workflowId } = workerData as RecordingWorkerData;
@@ -47,28 +48,37 @@ async function main() {
     }
     scriptId = scriptRow.id;
 
-    const result = await recorder.record(runId, scriptRow);
+    // pages.url is stored as a path (e.g. "/orders"), not a full URL -- resolve it
+    // against the site this workflow's project was actually crawled from.
+    const workflowRun = await WorkflowRun.findByPk(runId);
+    const crawlJob = workflowRun
+      ? await CrawlJob.findOne({ where: { projectId: workflowRun.projectId }, order: [['createdAt', 'DESC']] })
+      : null;
+    const baseUrl = crawlJob ? new URL(crawlJob.targetUrl).origin : undefined;
+
+    const result = await recorder.record(runId, scriptRow, baseUrl);
 
     if (result.healed) {
       await persistHealedSteps(scriptRow.id, runId, result.stepMetadata, result.heals);
     }
 
-    await query(
-      `UPDATE workflow_runs
-       SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP, video_path = $1, captions_path = $2
-       WHERE id = $3`,
-      [path.basename(result.videoPath), path.basename(result.captionsPath), runId]
+    await WorkflowRun.update(
+      {
+        status: 'COMPLETED',
+        completedAt: new Date(),
+        videoPath: path.basename(result.videoPath),
+        captionsPath: path.basename(result.captionsPath)
+      },
+      { where: { id: runId } }
     );
     await markScriptOutcome(scriptRow.id, runId, 'SUCCEEDED');
     console.log(`[Recording Worker] Run ${runId} completed.`);
     parentPort?.postMessage({ ok: true });
   } catch (err: any) {
     console.error(`[Recording Worker] Run ${runId} failed:`, err);
-    await query(
-      `UPDATE workflow_runs
-       SET status = 'FAILED', completed_at = CURRENT_TIMESTAMP, error_message = $1
-       WHERE id = $2`,
-      [err?.message || String(err), runId]
+    await WorkflowRun.update(
+      { status: 'FAILED', completedAt: new Date(), errorMessage: err?.message || String(err) },
+      { where: { id: runId } }
     ).catch(() => {});
 
     if (scriptId) {
@@ -80,7 +90,7 @@ async function main() {
 
     parentPort?.postMessage({ ok: false, error: err?.message || String(err) });
   } finally {
-    await pool.end().catch(() => {});
+    await sequelize.close().catch(() => {});
   }
 }
 

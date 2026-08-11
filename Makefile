@@ -1,7 +1,7 @@
 .PHONY: help install build up start down stop restart rebuild \
         logs logs-api logs-admin logs-worker logs-recorder ps status health \
         db-shell db-migrate db-empty db-reset clean \
-        mock-server crawl-mock test docs \
+        mock-server crawl-mock test test-script-engine docs \
         extension extension-watch
 
 COMPOSE := docker compose
@@ -136,3 +136,12 @@ crawl-mock: mock-server ## Launch the mock CRM and queue a crawl of it via the A
 
 test: ## Run the self-contained mock crawl demo (no job queue -- prints a summary, writes output_schema.json)
 	docker exec crawler_app npm run test:mock
+
+# Bind-mounts the repo over the crawler-app image's /usr/src/app so this always runs your
+# current source (not whatever was baked in at image build time), builds it inside the
+# container, and runs against the real Postgres over the docker-internal network --
+# sidesteps any local Postgres already squatting on host port 5432. --service-ports is
+# deliberately omitted so this doesn't try to republish :3000 alongside the already-running
+# crawler_app container.
+test-script-engine: ## Run DeterministicScriptEngine against real crawled workflows (optional: WORKFLOW_ID=<uuid> for just one)
+	$(COMPOSE) run --rm -v "$(CURDIR):/usr/src/app" crawler-app sh -c "npm run build && node dist/test-script-engine.js $(WORKFLOW_ID)"

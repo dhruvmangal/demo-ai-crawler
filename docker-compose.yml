@@ -55,6 +55,11 @@ services:
     container_name: crawler_app
     ports:
       - "3000:3000"
+    # Auth/SMTP/OAuth secrets and other new config live in .env (gitignored, host-only --
+    # see .env.example) rather than being inlined here. `environment:` below still wins
+    # over env_file for the docker-internal hostnames (DATABASE_URL etc.).
+    env_file:
+      - .env
     environment:
       - PORT=3000
       - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
@@ -80,6 +85,8 @@ services:
     command: node dist/api/admin-server.js
     ports:
       - "3001:3001"
+    env_file:
+      - .env
     environment:
       - PORT=3001
       - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
@@ -97,6 +104,8 @@ services:
     build: .
     container_name: crawler_worker
     command: node dist/workers/crawl-worker.js
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
       - NEO4J_URI=bolt://neo4j:7687
@@ -117,13 +126,13 @@ services:
   # Playwright recording agent: polls workflow_runs and dispatches each claimed run to
   # its own worker_threads Worker (recording-worker-thread.ts, up to RECORDING_CONCURRENCY
   # at once) so the poller itself never blocks. A workflow's first run generates and
-  # persists a Playwright script via a planner/generator agent pair (script-planner.ts,
-  # script-generator.ts -- verifying selectors against a live page as it writes the
-  # script); every later run of the same workflow replays that persisted script with no
-  # LLM calls at all, unless a step throws, in which case script-healer.ts repairs it in
-  # place, mid-recording, and the fix is persisted for next time. Shares the `recordings`
-  # volume with crawler-app, which serves it at /recordings/*. Requires ANTHROPIC_API_KEY
-  # to be set in the shell environment or a .env file.
+  # persists a Playwright script via DeterministicScriptEngine -- no LLM call, no live
+  # browser, resolved straight from the crawl-time knowledge base; every run of the same
+  # workflow replays that persisted script with no LLM calls at all, unless a step throws,
+  # in which case script-healer.ts repairs it in place, mid-recording, using the same
+  # local Ollama model crawl-time summarization uses (not Anthropic), and the fix is
+  # persisted for next time. Shares the `recordings` volume with crawler-app, which serves
+  # it at /recordings/*.
   workflow-agent-worker:
     build: .
     container_name: crawler_workflow_agent
@@ -131,12 +140,15 @@ services:
     environment:
       - DATABASE_URL=postgresql://crawler_user:crawler_password@postgres:5432/crawler_db
       - RECORDINGS_DIR=/usr/src/app/recordings
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_URL=http://llm:11434
+      - OLLAMA_MODEL=qwen2.5:3b-instruct
+      - OLLAMA_TIMEOUT_MS=180000
       - RECORDING_CONCURRENCY=2
     volumes:
       - recordings:/usr/src/app/recordings
     depends_on:
       - postgres
+      - llm
 
   # Build-only container: bundles the Chrome extension (TypeScript + Three.js) into
   # ./extension/dist with esbuild, then exits. A browser extension can't "run" in a

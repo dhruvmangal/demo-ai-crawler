@@ -1,5 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../config/database';
+import { authorizeAdmin } from '../middleware/authorize-admin';
+import { asyncHandler } from '../middleware/async-handler';
+import { ok } from '../utils/response-envelope';
+import { BadRequestError, NotFoundError } from '../errors/api-error';
 
 /**
  * Read-only endpoints backing the admin backoffice at /admin.
@@ -19,11 +23,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * Lists every crawl request, newest first, with per-project rollup counts and totals
  * for the dashboard header. Supports ?limit= (default 100, max 500) and ?status=.
  */
-adminRouter.get('/requests', async (req: Request, res: Response) => {
-  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '100'), 10) || 100, 1), 500);
-  const status = typeof req.query.status === 'string' && req.query.status ? req.query.status : null;
+adminRouter.get(
+  '/requests',
+  authorizeAdmin('crawl.view'),
+  asyncHandler(async (req: Request, res: Response) => {
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '100'), 10) || 100, 1), 500);
+    const status = typeof req.query.status === 'string' && req.query.status ? req.query.status : null;
 
-  try {
     const [requestsRes, totalsRes] = await Promise.all([
       query(
         `SELECT j.id, j.project_id, j.target_url, j.status, j.login_url,
@@ -53,11 +59,9 @@ adminRouter.get('/requests', async (req: Request, res: Response) => {
       )
     ]);
 
-    return res.json({ totals: totalsRes.rows[0], requests: requestsRes.rows });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+    return ok(res, { totals: totalsRes.rows[0], requests: requestsRes.rows });
+  })
+);
 
 /**
  * GET /api/admin/requests/:id
@@ -66,13 +70,15 @@ adminRouter.get('/requests', async (req: Request, res: Response) => {
  * belonging to its project. The knowledge graph itself is fetched separately from
  * GET /api/graph/:projectId, and videos from /recordings/{video_path}.
  */
-adminRouter.get('/requests/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  if (!UUID_RE.test(id)) {
-    return res.status(400).json({ error: 'id must be a UUID' });
-  }
+adminRouter.get(
+  '/requests/:id',
+  authorizeAdmin('crawl.view'),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) {
+      throw new BadRequestError('id must be a UUID');
+    }
 
-  try {
     const jobRes = await query(
       `SELECT id, project_id, target_url, status, login_url, error_message,
               created_at, started_at, completed_at
@@ -80,7 +86,7 @@ adminRouter.get('/requests/:id', async (req: Request, res: Response) => {
       [id]
     );
     if (jobRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Crawl request not found' });
+      throw new NotFoundError('Crawl request not found');
     }
     const job = jobRes.rows[0];
     const projectId = job.project_id;
@@ -123,7 +129,7 @@ adminRouter.get('/requests/:id', async (req: Request, res: Response) => {
         [projectId]
       ),
       query(
-        `SELECT w.id, w.name, w.confidence,
+        `SELECT w.id, w.name, w.confidence, w.type,
                 COALESCE(
                   json_agg(
                     json_build_object(
@@ -143,7 +149,7 @@ adminRouter.get('/requests/:id', async (req: Request, res: Response) => {
          LEFT JOIN entities e ON e.id = ws.entity_id
          WHERE w.project_id = $1
          GROUP BY w.id
-         ORDER BY w.confidence DESC, w.name ASC`,
+         ORDER BY (w.type = 'TOUR') DESC, w.confidence DESC, w.name ASC`,
         [projectId]
       ),
       query(
@@ -159,7 +165,7 @@ adminRouter.get('/requests/:id', async (req: Request, res: Response) => {
       query(`SELECT domain, summary_data, created_at FROM knowledge_summaries WHERE project_id = $1`, [projectId])
     ]);
 
-    return res.json({
+    return ok(res, {
       job,
       summary: summaryRes.rows[0] || null,
       pages: pagesRes.rows,
@@ -168,7 +174,5 @@ adminRouter.get('/requests/:id', async (req: Request, res: Response) => {
       workflows: workflowsRes.rows,
       runs: runsRes.rows
     });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+  })
+);

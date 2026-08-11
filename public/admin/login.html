@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Narreto · Admin Login</title>
+    <link rel="stylesheet" href="admin.css" />
+    <style>
+      .login-shell {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .login-card {
+        width: 320px;
+        padding: 32px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .login-card h1 {
+        font-size: 1.1rem;
+        margin: 0 0 4px;
+      }
+      .login-card p {
+        margin: 0 0 20px;
+        opacity: 0.7;
+        font-size: 0.85rem;
+      }
+      .login-card label {
+        display: block;
+        font-size: 0.8rem;
+        margin-bottom: 6px;
+        opacity: 0.8;
+      }
+      .login-card input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px 10px;
+        margin-bottom: 14px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        background: rgba(0, 0, 0, 0.2);
+        color: inherit;
+      }
+      .login-card button {
+        width: 100%;
+        padding: 10px;
+        border-radius: 6px;
+        border: none;
+        background: #35e2ff;
+        color: #001018;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .login-card button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .login-error {
+        color: #ff6b6b;
+        font-size: 0.8rem;
+        margin: -6px 0 14px;
+        min-height: 1em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="login-shell">
+      <form class="login-card" id="login-form">
+        <h1>NARRETO ADMIN</h1>
+        <p>Sign in to access the backoffice.</p>
+        <label for="email">Email</label>
+        <input type="email" id="email" autocomplete="username" required />
+        <label for="password">Password</label>
+        <input type="password" id="password" autocomplete="current-password" required />
+        <p class="login-error" id="login-error"></p>
+        <button type="submit" id="login-submit">Sign in</button>
+      </form>
+    </div>
+
+    <script src="auth.js"></script>
+    <script src="login.js"></script>
+  </body>
+</html>

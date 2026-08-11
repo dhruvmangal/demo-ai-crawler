@@ -1,11 +1,59 @@
 import { Router, Request, Response } from 'express';
-import { query } from '../config/database';
+import { Op } from 'sequelize';
 import { v4 as uuidv4 } from 'uuid';
+import { sequelize } from '../config/sequelize';
+import { CrawlJob, CrawlCredential, WorkflowRun, KnowledgeSummary } from '../db/models';
 import { graphRouter } from './graph-routes';
 import { workflowRunRouter } from './workflow-run-routes';
 import { authRouter } from './auth-routes';
+import { userRouter } from './user-routes';
+import { asyncHandler } from '../middleware/async-handler';
+import { validate } from '../middleware/validate';
+import { ok } from '../utils/response-envelope';
+import { ConflictError, NotFoundError } from '../errors/api-error';
+import { crawlHeavy, readLoose } from '../middleware/rate-limiters';
+import { authenticate } from '../middleware/authenticate';
+import { assertSafeUrl } from '../security/ssrf-guard';
+import { crawlBodySchema, credentialsBodySchema } from '../validation/schemas/crawl.schemas';
 
 export const router = Router();
+
+// extension/src/api.ts's CrawlJob/WorkflowRun types (and this API's own long-standing
+// wire format) are snake_case -- Sequelize model instances serialize their JS attribute
+// names (camelCase) by default, so responses are explicitly re-shaped back to snake_case
+// here to avoid a silent breaking change for existing API consumers.
+function crawlJobJson(job: CrawlJob) {
+  return {
+    id: job.id,
+    project_id: job.projectId,
+    target_url: job.targetUrl,
+    status: job.status,
+    login_url: job.loginUrl,
+    started_at: job.startedAt,
+    completed_at: job.completedAt,
+    error_message: job.errorMessage,
+    created_at: job.createdAt
+  };
+}
+
+function summaryJson(summary: KnowledgeSummary) {
+  return { domain: summary.domain, summary_data: summary.summaryData, created_at: summary.createdAt };
+}
+
+function workflowRunJson(run: WorkflowRun) {
+  return {
+    id: run.id,
+    workflow_id: run.workflowId,
+    project_id: run.projectId,
+    status: run.status,
+    video_path: run.videoPath,
+    captions_path: run.captionsPath,
+    error_message: run.errorMessage,
+    started_at: run.startedAt,
+    completed_at: run.completedAt,
+    created_at: run.createdAt
+  };
+}
 
 // How long a completed crawl for a given target URL is considered fresh. A new
 // POST /api/crawl for the same URL within this window reuses that result instead of
@@ -13,9 +61,18 @@ export const router = Router();
 const CRAWL_TTL_HOURS = Math.max(0, Number(process.env.CRAWL_TTL_HOURS) || 24);
 
 /**
- * Authentication and User Tracking routes (Google, GitHub, and Demo logins/signups)
+ * Authentication and User Tracking routes (email/password, Google, GitHub)
  */
 router.use('/auth', authRouter);
+
+// Every route below requires a valid access token -- the "no signup, no access" cutover.
+// The extension (extension/src/api.ts) has been verified end-to-end against this already.
+router.use(authenticate);
+
+/**
+ * The logged-in user's own profile + post-signup onboarding.
+ */
+router.use('/users', userRouter);
 
 /**
  * POST /api/crawl
@@ -23,76 +80,55 @@ router.use('/auth', authRouter);
  * to completion within CRAWL_TTL_HOURS, returns that existing job/project instead of
  * queuing a new crawl.
  */
-router.post('/crawl', async (req: Request, res: Response) => {
-  const { targetUrl, projectId } = req.body;
+router.post(
+  '/crawl',
+  crawlHeavy,
+  validate({ body: crawlBodySchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { targetUrl, projectId } = req.body as { targetUrl: string; projectId?: string };
 
-  if (!targetUrl) {
-    return res.status(400).json({ error: 'targetUrl is required' });
-  }
+    // Fast, fail-early rejection. Not sufficient alone (TOCTOU + redirects) -- re-checked
+    // in crawl-worker.ts before the crawl actually starts, and enforced per-navigation
+    // inside playwright-crawler.ts itself.
+    await assertSafeUrl(targetUrl);
 
-  try {
     if (CRAWL_TTL_HOURS > 0) {
-      const recentRes = await query(
-        `SELECT id, project_id, target_url, status, created_at, completed_at
-         FROM crawl_jobs
-         WHERE target_url = $1
-           AND status = 'COMPLETED'
-           AND completed_at > NOW() - make_interval(hours => $2::int)
-         ORDER BY completed_at DESC
-         LIMIT 1`,
-        [targetUrl, CRAWL_TTL_HOURS]
-      );
+      const cutoff = new Date(Date.now() - CRAWL_TTL_HOURS * 60 * 60 * 1000);
+      const recent = await CrawlJob.findOne({
+        where: { targetUrl, status: 'COMPLETED', completedAt: { [Op.gt]: cutoff } },
+        order: [['completedAt', 'DESC']]
+      });
 
-      if ((recentRes.rowCount ?? 0) > 0) {
-        return res.status(200).json({
+      if (recent) {
+        return ok(res, {
           message: `Reusing crawl completed within the last ${CRAWL_TTL_HOURS}h; not re-crawling.`,
           cached: true,
-          job: recentRes.rows[0]
+          job: crawlJobJson(recent)
         });
       }
     }
 
-    const projId = projectId || uuidv4();
-    const jobRes = await query(
-      `INSERT INTO crawl_jobs (project_id, target_url, status)
-       VALUES ($1, $2, 'PENDING')
-       RETURNING id, project_id, target_url, status, created_at`,
-      [projId, targetUrl]
-    );
+    const job = await CrawlJob.create({ projectId: projectId || uuidv4(), targetUrl, status: 'PENDING' });
 
-    return res.status(201).json({
-      message: 'Crawl job queued successfully',
-      cached: false,
-      job: jobRes.rows[0]
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+    return ok(res, { message: 'Crawl job queued successfully', cached: false, job: crawlJobJson(job) }, 201);
+  })
+);
 
 /**
  * GET /api/crawl/:id
  * Fetches status of a crawl job.
  */
-router.get('/crawl/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-
-  try {
-    const jobRes = await query(
-      `SELECT id, project_id, target_url, status, login_url, started_at, completed_at, error_message
-       FROM crawl_jobs WHERE id = $1`,
-      [id]
-    );
-
-    if (jobRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Crawl job not found' });
+router.get(
+  '/crawl/:id',
+  readLoose,
+  asyncHandler(async (req: Request, res: Response) => {
+    const job = await CrawlJob.findByPk(req.params.id);
+    if (!job) {
+      throw new NotFoundError('Crawl job not found');
     }
-
-    return res.json(jobRes.rows[0]);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+    return ok(res, crawlJobJson(job));
+  })
+);
 
 /**
  * POST /api/crawl/:id/credentials
@@ -100,49 +136,41 @@ router.get('/crawl/:id', async (req: Request, res: Response) => {
  * Credentials are held in crawl_credentials only transiently -- the worker deletes the row
  * as soon as it reads it, whether or not the login attempt succeeds.
  */
-router.post('/crawl/:id/credentials', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { username, password } = req.body;
+router.post(
+  '/crawl/:id/credentials',
+  crawlHeavy,
+  validate({ body: credentialsBodySchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { username, password } = req.body as { username: string; password: string };
 
-  if (!username || !password) {
-    return res.status(400).json({ error: 'username and password are required' });
-  }
-
-  try {
-    const jobRes = await query(`SELECT id, status FROM crawl_jobs WHERE id = $1`, [id]);
-
-    if (jobRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Crawl job not found' });
+    const job = await CrawlJob.findByPk(id);
+    if (!job) {
+      throw new NotFoundError('Crawl job not found');
     }
-    if (jobRes.rows[0].status !== 'AWAITING_CREDENTIALS') {
-      return res.status(409).json({
-        error: `Job is not awaiting credentials (current status: ${jobRes.rows[0].status})`
-      });
+    if (job.status !== 'AWAITING_CREDENTIALS') {
+      throw new ConflictError(`Job is not awaiting credentials (current status: ${job.status})`);
     }
 
-    // Replace any prior submission for this job, then hand it back to the worker.
-    await query(`DELETE FROM crawl_credentials WHERE crawl_job_id = $1`, [id]);
-    await query(
-      `INSERT INTO crawl_credentials (crawl_job_id, username, password) VALUES ($1, $2, $3)`,
-      [id, username, password]
-    );
-    await query(
-      `UPDATE crawl_jobs SET status = 'PENDING', error_message = NULL WHERE id = $1`,
-      [id]
-    );
+    // Replace any prior submission for this job, then hand it back to the worker -- one
+    // atomic unit so a crash mid-way never leaves stale credentials alongside a job
+    // that's already flipped back to PENDING (or vice versa).
+    await sequelize.transaction(async t => {
+      await CrawlCredential.destroy({ where: { crawlJobId: id }, transaction: t });
+      await CrawlCredential.create({ crawlJobId: id, username, password }, { transaction: t });
+      await job.update({ status: 'PENDING', errorMessage: null }, { transaction: t });
+    });
 
-    return res.json({ message: 'Credentials submitted; crawl will resume shortly.' });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+    return ok(res, { message: 'Credentials submitted; crawl will resume shortly.' });
+  })
+);
 
 /**
  * GET /api/graph/:projectId
  * Returns Neo4j nodes and edges projection for visualization. Handler lives in
  * graph-routes.ts so the standalone admin server can mount it too.
  */
-router.use('/graph', graphRouter);
+router.use('/graph', readLoose, graphRouter);
 
 /**
  * POST /api/workflows/:workflowId/run
@@ -151,53 +179,37 @@ router.use('/graph', graphRouter);
  * descriptions and entities already collected for those steps. Handler lives in
  * workflow-run-routes.ts so the standalone admin server can mount it too.
  */
-router.use('/workflows', workflowRunRouter);
+router.use('/workflows', crawlHeavy, workflowRunRouter);
 
 /**
  * GET /api/workflow-runs/:id
  * Fetches status of a workflow recording run. Once COMPLETED, video_path/captions_path
  * are filenames servable under /recordings/*.
  */
-router.get('/workflow-runs/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-
-  try {
-    const runRes = await query(
-      `SELECT id, workflow_id, project_id, status, video_path, captions_path,
-              error_message, started_at, completed_at
-       FROM workflow_runs WHERE id = $1`,
-      [id]
-    );
-
-    if (runRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Workflow run not found' });
+router.get(
+  '/workflow-runs/:id',
+  readLoose,
+  asyncHandler(async (req: Request, res: Response) => {
+    const run = await WorkflowRun.findByPk(req.params.id);
+    if (!run) {
+      throw new NotFoundError('Workflow run not found');
     }
-
-    return res.json(runRes.rows[0]);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+    return ok(res, workflowRunJson(run));
+  })
+);
 
 /**
  * GET /api/summary/:projectId
  * Returns high-level domain summary to save AI token usage.
  */
-router.get('/summary/:projectId', async (req: Request, res: Response) => {
-  const { projectId } = req.params;
-
-  try {
-    const summaryRes = await query(
-      `SELECT domain, summary_data, created_at FROM knowledge_summaries WHERE project_id = $1`,
-      [projectId]
-    );
-
-    if (summaryRes.rowCount === 0) {
-      return res.status(404).json({ error: 'Summary not found for this project' });
+router.get(
+  '/summary/:projectId',
+  readLoose,
+  asyncHandler(async (req: Request, res: Response) => {
+    const summary = await KnowledgeSummary.findOne({ where: { projectId: req.params.projectId } });
+    if (!summary) {
+      throw new NotFoundError('Summary not found for this project');
     }
-
-    return res.json(summaryRes.rows[0]);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+    return ok(res, summaryJson(summary));
+  })
+);
