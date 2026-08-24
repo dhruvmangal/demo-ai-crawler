@@ -25,7 +25,11 @@ export class PageSummarizer {
     const cleanedHtml = this.cleanHtml(input.html).slice(0, MAX_HTML_CHARS);
 
     const elementsList = input.elements
-      .map(el => `- selector: ${el.selector} | type: ${el.type} | label: ${el.label}`)
+      .map(el => {
+        const via = el.metadata?.discoveredVia;
+        const gatedNote = via ? ` | only visible after: ${via.type} "${via.triggerLabel}"` : '';
+        return `- selector: ${el.selector} | type: ${el.type} | label: ${el.label}${gatedNote}`;
+      })
       .join('\n') || '(none discovered)';
 
     const prompt = `You are analyzing a web application page to build a knowledge base entry.
@@ -38,6 +42,8 @@ ${cleanedHtml || '(none)'}
 
 Discovered UI elements on this page:
 ${elementsList}
+
+Some elements are marked "only visible after: <interaction>" -- those are real, functional UI that a user only sees after switching a tab, expanding an accordion, opening a modal, or scrolling for more content. Treat them as part of this page's functionality in "description" (e.g. "a second tab exposes X"), not as if they were always on screen.
 
 Respond with ONLY a JSON object matching this exact shape, no other text:
 {
