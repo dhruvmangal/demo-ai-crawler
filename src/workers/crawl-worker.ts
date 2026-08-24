@@ -1,9 +1,9 @@
 import { sequelize } from '../config/sequelize';
-import { CrawlJob, CrawlCredential } from '../db/models';
-import { PlaywrightCrawler, LoginRequiredError, CrawlCredentials } from '../crawler/playwright-crawler';
+import { CrawlJob, CrawlCredential, CrawlSession, ProjectCredential } from '../db/models';
+import { crawl as crawlViaEngine, LoginRequiredError, CrawlCredentials, PlaywrightStorageState } from '../crawler/crawler-engine-client';
 import { KnowledgeBuilder } from '../knowledge/knowledge-builder';
 import { KnowledgeSummarizer } from '../knowledge/knowledge-summarizer';
-import { assertSafeUrl } from '../security/ssrf-guard';
+import { assertSafeUrl, assertAllowedCdpUrl } from '../security/ssrf-guard';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -47,7 +47,7 @@ const enrichSemaphore = new AsyncSemaphore(ENRICH_CONCURRENCY);
  * job. Deliberately not awaited by the polling loop -- the next PENDING job's crawl should
  * be able to start as soon as this job's crawl finishes, without waiting on the LLM.
  */
-async function enrichJob(job: CrawlJob, rawPages: Awaited<ReturnType<PlaywrightCrawler['crawl']>>) {
+async function enrichJob(job: CrawlJob, rawPages: Awaited<ReturnType<typeof crawlViaEngine>>) {
   const release = await enrichSemaphore.acquire();
   try {
     const builtKnowledge = await KnowledgeBuilder.build(job.projectId, rawPages);
@@ -100,6 +100,23 @@ async function processNextJob() {
   if (credRow) {
     credentials = { username: credRow.username, password: credRow.password };
     await CrawlCredential.destroy({ where: { crawlJobId: job.id } });
+  } else {
+    // No credentials submitted for this specific job -- fall back to whatever previously
+    // worked for this project (see the upsert after a successful crawl below), so the
+    // caller doesn't have to resubmit them on every re-crawl.
+    const saved = await ProjectCredential.findOne({ where: { projectId: job.projectId } });
+    if (saved) {
+      credentials = { username: saved.username, password: saved.password };
+    }
+  }
+
+  // Same one-time-use handling for a submitted storageState (an already-authenticated
+  // session), so the crawl starts logged in instead of hitting the login wall.
+  let storageState: PlaywrightStorageState | undefined;
+  const sessionRow = await CrawlSession.findOne({ where: { crawlJobId: job.id }, order: [['createdAt', 'DESC']] });
+  if (sessionRow) {
+    storageState = sessionRow.storageState as PlaywrightStorageState;
+    await CrawlSession.destroy({ where: { crawlJobId: job.id } });
   }
 
   try {
@@ -107,14 +124,29 @@ async function processNextJob() {
     // submission time) since target_url could in principle be re-queued without going
     // back through that endpoint (e.g. the credentials-resubmission path).
     await assertSafeUrl(job.targetUrl);
+    if (job.connectCdpUrl) {
+      // Same defense-in-depth reasoning: re-validated against CDP_ALLOWED_HOSTS here since
+      // this is what the crawl actually connects to, not just what passed validation at
+      // submission time (the allowlist could have changed since).
+      assertAllowedCdpUrl(job.connectCdpUrl);
+    }
 
-    const crawler = new PlaywrightCrawler();
-    const rawPages = await crawler.crawl({
+    const rawPages = await crawlViaEngine({
       projectId: job.projectId,
       startUrl: job.targetUrl,
       maxPages: 10,
-      credentials
+      credentials,
+      storageState,
+      autoRegister: job.autoRegister,
+      connectCdpUrl: job.connectCdpUrl || undefined
     });
+
+    // The crawl didn't throw LoginRequiredError, so if credentials were in play they worked
+    // (whether submitted, reused from the vault, or just freshly auto-registered) -- save
+    // them for this project so future crawls skip straight past the login wall.
+    if (credentials) {
+      await ProjectCredential.upsert({ projectId: job.projectId, username: credentials.username, password: credentials.password });
+    }
 
     // Crawling is done. Hand off AI summarization/knowledge extraction/graph projection
     // to run in the background (bounded by ENRICH_CONCURRENCY) instead of awaiting it here

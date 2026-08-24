@@ -11,5 +11,8 @@ output_schema.json
 .env.*
 !.env.example
 
+# Copied Chrome profile from `make cdp-browser` -- contains real session cookies, never commit
+.chrome-cdp-profile/
+
 .DS_Store
 *.log

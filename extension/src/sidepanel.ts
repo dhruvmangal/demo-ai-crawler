@@ -1,13 +1,15 @@
 import {
   CrawlJob,
   RECORDINGS_BASE,
+  StartCrawlOptions,
   WorkflowRun,
   getGraph,
   pollCrawlJob,
   pollWorkflowRun,
   runWorkflow,
   startCrawl,
-  submitCredentials
+  submitCredentials,
+  submitSession
 } from './api';
 import { buildPageTree, extractWorkflows, renderTree, renderWorkflows, WorkflowSummary } from './render';
 import { NeuronField } from './neuronField';
@@ -102,6 +104,24 @@ app.innerHTML = `
   <section id="view-idle" class="view hidden">
     <label class="field-label" for="target-url">TARGET URL</label>
     <input id="target-url" class="hud-input" type="url" placeholder="https://example.com" />
+
+    <details id="advanced-details" class="advanced-box">
+      <summary class="advanced-summary">ADVANCED</summary>
+      <div class="advanced-body">
+        <label class="field-label" for="adv-username">USERNAME (OPTIONAL)</label>
+        <input id="adv-username" class="hud-input" type="text" placeholder="username" autocomplete="off" />
+        <label class="field-label" for="adv-password">PASSWORD (OPTIONAL)</label>
+        <input id="adv-password" class="hud-input" type="password" placeholder="password" autocomplete="off" />
+        <label class="checkbox-label" for="adv-auto-register">
+          <input id="adv-auto-register" type="checkbox" />
+          AUTO-REGISTER IF LOGIN FAILS
+        </label>
+        <label class="field-label" for="adv-cdp-url">CDP DEBUG URL (OPTIONAL)</label>
+        <input id="adv-cdp-url" class="hud-input" type="text" placeholder="http://192.168.65.254:9222" />
+        <p class="advanced-hint">Paste the URL printed by <code>make cdp-browser</code> to attach the crawl to an already-authenticated Chrome instance instead of logging in.</p>
+      </div>
+    </details>
+
     <button id="scan-btn" class="hud-button">INITIATE SCAN</button>
   </section>
 
@@ -112,7 +132,21 @@ app.innerHTML = `
       <p class="field-label">SITE REQUIRES AUTHENTICATION</p>
       <input id="cred-username" class="hud-input" type="text" placeholder="username" />
       <input id="cred-password" class="hud-input" type="password" placeholder="password" />
+      <label class="checkbox-label" for="cred-auto-register">
+        <input id="cred-auto-register" type="checkbox" />
+        AUTO-REGISTER IF LOGIN FAILS
+      </label>
       <button id="cred-submit" class="hud-button">SUBMIT CREDENTIALS</button>
+
+      <details class="advanced-box">
+        <summary class="advanced-summary">USE SESSION INSTEAD</summary>
+        <div class="advanced-body">
+          <label class="field-label" for="cred-session-json">STORAGE STATE JSON</label>
+          <textarea id="cred-session-json" class="hud-input hud-textarea" rows="4" placeholder='{"cookies": [...], "origins": [...]}'></textarea>
+          <p id="cred-session-error" class="error-text hidden"></p>
+          <button id="cred-session-submit" class="hud-button">USE SESSION</button>
+        </div>
+      </details>
     </div>
     <button id="cancel-btn" class="hud-button hud-button-ghost">CANCEL</button>
   </section>
@@ -185,6 +219,11 @@ const els = {
   logoutBtn: document.getElementById('logout-btn')!,
   authCloseBtn: document.getElementById('auth-close-btn')!,
   targetUrl: document.getElementById('target-url') as HTMLInputElement,
+  advancedDetails: document.getElementById('advanced-details') as HTMLDetailsElement,
+  advUsername: document.getElementById('adv-username') as HTMLInputElement,
+  advPassword: document.getElementById('adv-password') as HTMLInputElement,
+  advAutoRegister: document.getElementById('adv-auto-register') as HTMLInputElement,
+  advCdpUrl: document.getElementById('adv-cdp-url') as HTMLInputElement,
   scanBtn: document.getElementById('scan-btn')!,
   cancelBtn: document.getElementById('cancel-btn')!,
   neuronMount: document.getElementById('neuron-mount')!,
@@ -192,7 +231,11 @@ const els = {
   credentialsBox: document.getElementById('credentials-box')!,
   credUsername: document.getElementById('cred-username') as HTMLInputElement,
   credPassword: document.getElementById('cred-password') as HTMLInputElement,
+  credAutoRegister: document.getElementById('cred-auto-register') as HTMLInputElement,
   credSubmit: document.getElementById('cred-submit')!,
+  credSessionJson: document.getElementById('cred-session-json') as HTMLTextAreaElement,
+  credSessionError: document.getElementById('cred-session-error')!,
+  credSessionSubmit: document.getElementById('cred-session-submit')!,
   errorText: document.getElementById('error-text')!,
   retryBtn: document.getElementById('retry-btn')!,
   newScanBtn: document.getElementById('new-scan-btn')!,
@@ -323,16 +366,18 @@ async function getActiveTabUrl(): Promise<string> {
 function resetScanningUI() {
   els.credentialsBox.classList.add('hidden');
   els.scanStatusText.textContent = STATUS_LABEL.PENDING;
+  els.credSessionError.classList.add('hidden');
+  els.credSessionJson.value = '';
 }
 
-async function beginScan(targetUrl: string) {
+async function beginScan(targetUrl: string, options?: StartCrawlOptions) {
   showView('scanning');
   resetScanningUI();
   neuronField = new NeuronField(els.neuronMount);
   neuronField.start();
 
   try {
-    const job = await startCrawl(targetUrl);
+    const job = await startCrawl(targetUrl, options);
     currentJob = job;
     activePoll = pollCrawlJob(job.id, onJobUpdate);
   } catch (err: any) {
@@ -612,7 +657,20 @@ els.scanBtn.addEventListener('click', () => {
   if (!requireLogin()) return;
   const url = els.targetUrl.value.trim();
   if (!url) return;
-  beginScan(url);
+
+  const username = els.advUsername.value.trim();
+  const password = els.advPassword.value;
+  const connectCdpUrl = els.advCdpUrl.value.trim();
+
+  const options: StartCrawlOptions = {};
+  if (username && password) {
+    options.credentials = { username, password };
+    if (els.advAutoRegister.checked) options.autoRegister = true;
+  }
+  if (connectCdpUrl) options.connectCdpUrl = connectCdpUrl;
+
+  els.advPassword.value = '';
+  beginScan(url, options);
 });
 
 els.cancelBtn.addEventListener('click', () => {
@@ -650,13 +708,42 @@ els.credSubmit.addEventListener('click', async () => {
   const username = els.credUsername.value.trim();
   const password = els.credPassword.value;
   if (!username || !password) return;
+  const autoRegister = els.credAutoRegister.checked;
   try {
-    await submitCredentials(currentJob.id, username, password);
+    await submitCredentials(currentJob.id, username, password, autoRegister || undefined);
     els.credentialsBox.classList.add('hidden');
     els.credUsername.value = '';
     els.credPassword.value = '';
+    els.credAutoRegister.checked = false;
   } catch (err: any) {
     showError(err?.message || 'Failed to submit credentials.');
+  }
+});
+
+els.credSessionSubmit.addEventListener('click', async () => {
+  if (!requireLogin()) return;
+  if (!currentJob) return;
+  els.credSessionError.classList.add('hidden');
+
+  const raw = els.credSessionJson.value.trim();
+  if (!raw) return;
+
+  let storageState: object;
+  try {
+    storageState = JSON.parse(raw);
+  } catch {
+    els.credSessionError.textContent = 'Storage state must be valid JSON.';
+    els.credSessionError.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    await submitSession(currentJob.id, storageState);
+    els.credentialsBox.classList.add('hidden');
+    els.credSessionJson.value = '';
+  } catch (err: any) {
+    els.credSessionError.textContent = err?.message || 'Failed to submit session.';
+    els.credSessionError.classList.remove('hidden');
   }
 });
 

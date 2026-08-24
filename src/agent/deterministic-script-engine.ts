@@ -123,7 +123,7 @@ export function buildActionForElement(el: KnowledgeUiElement, ctx: ActionContext
     };
   }
 
-  if (el.type === 'input') {
+  if (el.type === 'input' || el.type === 'textarea') {
     const value = inferInputValue(el, ctx);
     const lines = [`  await page.fill(${JSON.stringify(el.selector)}, ${JSON.stringify(value)});`];
     if (looksLikeSearch(el, ctx)) {
@@ -136,10 +136,18 @@ export function buildActionForElement(el: KnowledgeUiElement, ctx: ActionContext
   // routinely present-but-invisible (e.g. a hidden SSO auto-submit form), so clicking it
   // directly just times out waiting for visibility. The actual actionable thing (a submit
   // button, a row action, a close button) is a *descendant* we have no specific selector
-  // for, so the safe move is to skip rather than guess a container-wide click.
-  if (el.type === 'form' || el.type === 'table' || el.type === 'dialog') {
+  // for, so the safe move is to skip rather than guess a container-wide click. `select` is
+  // here too -- it needs page.selectOption() with a known option value, which UiDiscovery
+  // doesn't extract yet, so a click would be wrong rather than just imprecise. The rest
+  // (card/image/alert/badge/breadcrumb/pagination/menu) are display-only components from
+  // the broadened UiDiscovery taxonomy -- clicking a badge or an image isn't a real action.
+  if (
+    el.type === 'form' || el.type === 'table' || el.type === 'dialog' || el.type === 'select' ||
+    el.type === 'card' || el.type === 'image' || el.type === 'alert' || el.type === 'badge' ||
+    el.type === 'breadcrumb' || el.type === 'pagination' || el.type === 'menu'
+  ) {
     return {
-      lines: [`  // Skipped: "${label}" is a ${el.type} container, not a clickable element -- no specific descendant selector known.`],
+      lines: [`  // Skipped: "${label}" is a ${el.type} container/display element, not a clickable target.`],
       narrationPart: `${ctx.actionType || 'Act on'}${ctx.entityName ? ` ${ctx.entityName}` : ''}`,
       skipped: true
     };

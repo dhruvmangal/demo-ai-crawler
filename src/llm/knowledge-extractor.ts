@@ -65,7 +65,10 @@ export class KnowledgeExtractor {
    */
   public static async extract(input: {
     pages: Array<{ url: string; title: string; aiSummary?: string | null }>;
-    elements: Array<{ pageUrl: string; type: string; label: string; selector: string; aiDescription?: string | null; confidence: number }>;
+    elements: Array<{
+      pageUrl: string; type: string; label: string; selector: string; aiDescription?: string | null; confidence: number;
+      discoveredVia?: { type: string; triggerLabel: string } | null;
+    }>;
   }): Promise<AiKnowledgeResult | null> {
     const pagesList = input.pages
       .map(p => `- ${p.url} "${p.title}"${p.aiSummary ? ` - ${p.aiSummary}` : ''}`)
@@ -89,7 +92,8 @@ export class KnowledgeExtractor {
       .slice(0, MAX_ELEMENTS)
       .map(e => {
         const desc = (e.aiDescription || '').slice(0, MAX_ELEMENT_DESC_CHARS);
-        return `- [${e.pageUrl}] ${e.type} "${e.label}" (selector: ${e.selector})${desc ? ` - ${desc}` : ''}`;
+        const gatedNote = e.discoveredVia ? ` [only visible after ${e.discoveredVia.type}: "${e.discoveredVia.triggerLabel}"]` : '';
+        return `- [${e.pageUrl}] ${e.type} "${e.label}" (selector: ${e.selector})${gatedNote}${desc ? ` - ${desc}` : ''}`;
       })
       .join('\n');
 
@@ -101,7 +105,7 @@ ${pagesList || '(none)'}
 Components:
 ${elementsList || '(none)'}
 
-Based on the above, infer the business/domain entities, the actions users can take on them, the relationships between entities, and any multi-step workflows a user could complete on this site. Do not force-fit a CRM/e-commerce template -- infer whatever entities and workflows actually make sense for this specific site (which may be a marketing site, docs, a SaaS app, etc). If no meaningful workflow exists, return an empty "workflows" array rather than inventing one.
+Based on the above, infer the business/domain entities, the actions users can take on them, the relationships between entities, and any multi-step workflows a user could complete on this site. Do not force-fit a CRM/e-commerce template -- infer whatever entities and workflows actually make sense for this specific site (which may be a marketing site, docs, a SaaS app, etc). If no meaningful workflow exists, return an empty "workflows" array rather than inventing one. Some components are marked "[only visible after <interaction>]" -- they are real functionality gated behind a tab/accordion/modal/scroll interaction rather than something visible by default; still count them as real actions/entities, and prefer workflow steps that call out the interaction needed to reach them when relevant.
 
 Respond with ONLY a JSON object matching this exact shape, no other text:
 {

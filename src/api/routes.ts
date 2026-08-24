@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { Op } from 'sequelize';
 import { v4 as uuidv4 } from 'uuid';
 import { sequelize } from '../config/sequelize';
-import { CrawlJob, CrawlCredential, WorkflowRun, KnowledgeSummary } from '../db/models';
+import { CrawlJob, CrawlCredential, CrawlSession, WorkflowRun, KnowledgeSummary } from '../db/models';
 import { graphRouter } from './graph-routes';
 import { workflowRunRouter } from './workflow-run-routes';
 import { authRouter } from './auth-routes';
@@ -13,8 +13,8 @@ import { ok } from '../utils/response-envelope';
 import { ConflictError, NotFoundError } from '../errors/api-error';
 import { crawlHeavy, readLoose } from '../middleware/rate-limiters';
 import { authenticate } from '../middleware/authenticate';
-import { assertSafeUrl } from '../security/ssrf-guard';
-import { crawlBodySchema, credentialsBodySchema } from '../validation/schemas/crawl.schemas';
+import { assertSafeUrl, assertAllowedCdpUrl } from '../security/ssrf-guard';
+import { crawlBodySchema, credentialsBodySchema, sessionBodySchema } from '../validation/schemas/crawl.schemas';
 
 export const router = Router();
 
@@ -29,6 +29,8 @@ function crawlJobJson(job: CrawlJob) {
     target_url: job.targetUrl,
     status: job.status,
     login_url: job.loginUrl,
+    auto_register: job.autoRegister,
+    connect_cdp_url: job.connectCdpUrl,
     started_at: job.startedAt,
     completed_at: job.completedAt,
     error_message: job.errorMessage,
@@ -85,12 +87,23 @@ router.post(
   crawlHeavy,
   validate({ body: crawlBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
-    const { targetUrl, projectId } = req.body as { targetUrl: string; projectId?: string };
+    const { targetUrl, projectId, storageState, credentials, autoRegister, connectCdpUrl } = req.body as {
+      targetUrl: string;
+      projectId?: string;
+      storageState?: object;
+      credentials?: { username: string; password: string };
+      autoRegister?: boolean;
+      connectCdpUrl?: string;
+    };
 
     // Fast, fail-early rejection. Not sufficient alone (TOCTOU + redirects) -- re-checked
     // in crawl-worker.ts before the crawl actually starts, and enforced per-navigation
     // inside playwright-crawler.ts itself.
     await assertSafeUrl(targetUrl);
+
+    if (connectCdpUrl) {
+      assertAllowedCdpUrl(connectCdpUrl);
+    }
 
     if (CRAWL_TTL_HOURS > 0) {
       const cutoff = new Date(Date.now() - CRAWL_TTL_HOURS * 60 * 60 * 1000);
@@ -108,7 +121,27 @@ router.post(
       }
     }
 
-    const job = await CrawlJob.create({ projectId: projectId || uuidv4(), targetUrl, status: 'PENDING' });
+    const job = await CrawlJob.create({
+      projectId: projectId || uuidv4(),
+      targetUrl,
+      status: 'PENDING',
+      autoRegister: !!autoRegister,
+      connectCdpUrl: connectCdpUrl || null
+    });
+
+    // Optional: caller already has an authenticated Playwright storageState (exported via
+    // BrowserContext.storageState() after logging in themselves) and wants the crawl to
+    // start already logged in, instead of hitting the login wall / credentials flow.
+    if (storageState) {
+      await CrawlSession.create({ crawlJobId: job.id, storageState });
+    }
+
+    // Optional: submit login credentials upfront instead of waiting for the crawl to hit a
+    // login wall and pause at AWAITING_CREDENTIALS. Combined with autoRegister, the worker
+    // will create a new account with these credentials if they don't already work.
+    if (credentials) {
+      await CrawlCredential.create({ crawlJobId: job.id, username: credentials.username, password: credentials.password });
+    }
 
     return ok(res, { message: 'Crawl job queued successfully', cached: false, job: crawlJobJson(job) }, 201);
   })
@@ -134,7 +167,9 @@ router.get(
  * POST /api/crawl/:id/credentials
  * Submits login credentials for a job that is paused awaiting them (status AWAITING_CREDENTIALS).
  * Credentials are held in crawl_credentials only transiently -- the worker deletes the row
- * as soon as it reads it, whether or not the login attempt succeeds.
+ * as soon as it reads it, whether or not the login attempt succeeds. Pass autoRegister: true
+ * to have the worker create a new account with these credentials if logging in with them
+ * fails (e.g. no account exists yet on the target site).
  */
 router.post(
   '/crawl/:id/credentials',
@@ -142,7 +177,7 @@ router.post(
   validate({ body: credentialsBodySchema }),
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { username, password } = req.body as { username: string; password: string };
+    const { username, password, autoRegister } = req.body as { username: string; password: string; autoRegister?: boolean };
 
     const job = await CrawlJob.findByPk(id);
     if (!job) {
@@ -158,10 +193,48 @@ router.post(
     await sequelize.transaction(async t => {
       await CrawlCredential.destroy({ where: { crawlJobId: id }, transaction: t });
       await CrawlCredential.create({ crawlJobId: id, username, password }, { transaction: t });
-      await job.update({ status: 'PENDING', errorMessage: null }, { transaction: t });
+      const updates: { status: 'PENDING'; errorMessage: null; autoRegister?: boolean } = { status: 'PENDING', errorMessage: null };
+      if (autoRegister !== undefined) {
+        updates.autoRegister = autoRegister;
+      }
+      await job.update(updates, { transaction: t });
     });
 
     return ok(res, { message: 'Credentials submitted; crawl will resume shortly.' });
+  })
+);
+
+/**
+ * POST /api/crawl/:id/session
+ * Submits a Playwright storageState (cookies + localStorage) captured from an
+ * already-authenticated browser session for a job paused awaiting login, as an alternative
+ * to submitting username/password. Resumes the job authenticated without ever running the
+ * heuristic login form-fill in playwright-crawler.ts. Stored only transiently -- the worker
+ * deletes the row as soon as it reads it.
+ */
+router.post(
+  '/crawl/:id/session',
+  crawlHeavy,
+  validate({ body: sessionBodySchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { storageState } = req.body as { storageState: object };
+
+    const job = await CrawlJob.findByPk(id);
+    if (!job) {
+      throw new NotFoundError('Crawl job not found');
+    }
+    if (job.status !== 'AWAITING_CREDENTIALS') {
+      throw new ConflictError(`Job is not awaiting credentials (current status: ${job.status})`);
+    }
+
+    await sequelize.transaction(async t => {
+      await CrawlSession.destroy({ where: { crawlJobId: id }, transaction: t });
+      await CrawlSession.create({ crawlJobId: id, storageState }, { transaction: t });
+      await job.update({ status: 'PENDING', errorMessage: null }, { transaction: t });
+    });
+
+    return ok(res, { message: 'Session submitted; crawl will resume shortly.' });
   })
 );
 

@@ -1,5 +1,5 @@
 import { mockServer } from './mock-crm-server';
-import { PlaywrightCrawler } from './crawler/playwright-crawler';
+import { crawl as crawlViaEngine } from './crawler/crawler-engine-client';
 import { KnowledgeBuilder } from './knowledge/knowledge-builder';
 import { KnowledgeSummarizer } from './knowledge/knowledge-summarizer';
 import { query } from './config/database';
@@ -12,7 +12,10 @@ async function runTest() {
   console.log('--- STARTING KNOWLEDGE GRAPH CRAWLER TEST ---');
 
   const projectId = uuidv4();
-  const startUrl = 'http://localhost:4000/dashboard';
+  // crawler-engine now runs in its own container, so the mock CRM this process starts
+  // (below, on :4000) has to be reachable at the docker-network hostname, not localhost --
+  // same hostname the Makefile's `crawl-mock` target already uses for the job-queue path.
+  const startUrl = `http://${process.env.MOCK_CRM_HOST || 'localhost'}:4000/dashboard`;
 
   try {
     // 1. Initialize Postgres Tables
@@ -21,9 +24,10 @@ async function runTest() {
     await query(schemaSql);
     console.log('Postgres Schema Initialized.');
 
-    // 2. Execute Playwright crawl against local mock app
-    const crawler = new PlaywrightCrawler();
-    const rawPages = await crawler.crawl({
+    // 2. Execute a crawl against the local mock app, via crawler-engine over HTTP --
+    // this used to be an in-process `new PlaywrightCrawler().crawl()` call; verifying it
+    // now exercises the same HTTP path crawl-worker.ts uses, not the old in-process one.
+    const rawPages = await crawlViaEngine({
       projectId,
       startUrl,
       maxPages: 10

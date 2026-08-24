@@ -105,7 +105,7 @@ export class PlaywrightCrawler {
     const projectId = options.projectId;
 
     console.log(`Initializing Playwright crawl for project ${projectId} at ${options.startUrl}`);
-    
+
     let browser: Browser | null = null;
     let context: any = null;
     let page: PlaywrightPage;

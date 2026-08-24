@@ -12,7 +12,8 @@
     { "name": "Health", "description": "Service health check" },
     { "name": "Auth", "description": "User authentication, Google/GitHub OAuth sync, and audit logs" },
     { "name": "Crawl", "description": "Queue and track website crawl jobs" },
-    { "name": "Knowledge", "description": "Read back the extracted knowledge graph and summary" }
+    { "name": "Knowledge", "description": "Read back the extracted knowledge graph and summary" },
+    { "name": "Narration", "description": "Generate and preview demo narration/captions for a workflow" }
   ],
   "paths": {
     "/api/auth/sync": {
@@ -123,6 +124,29 @@
                     "type": "string",
                     "format": "uuid",
                     "description": "Optional. Reuse an existing project ID to re-crawl into the same project; omit to start a new project."
+                  },
+                  "storageState": {
+                    "$ref": "#/components/schemas/StorageState",
+                    "description": "Optional. A Playwright storageState (cookies + localStorage) captured from an already-authenticated browser session, e.g. via BrowserContext.storageState() after logging in yourself. When set, the crawl starts already logged in instead of crawling anonymously or pausing at AWAITING_CREDENTIALS."
+                  },
+                  "credentials": {
+                    "type": "object",
+                    "required": ["username", "password"],
+                    "description": "Optional. Submit login credentials upfront instead of waiting for the crawl to hit a login wall and pause at AWAITING_CREDENTIALS.",
+                    "properties": {
+                      "username": { "type": "string", "example": "demo@example.com" },
+                      "password": { "type": "string", "format": "password" }
+                    }
+                  },
+                  "autoRegister": {
+                    "type": "boolean",
+                    "description": "Optional, default false. If the site requires login and `credentials` don't already work, fall back to heuristically filling and submitting a signup/registration form with those same credentials to create a new account, then proceed logged in as that account. First-successful credentials (submitted, reused, or freshly registered) are saved for this project and reused automatically on later crawls."
+                  },
+                  "connectCdpUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "example": "http://localhost:9222",
+                    "description": "Optional. Attach to an already-running, already-authenticated browser over CDP (Playwright's chromium.connectOverCDP) instead of launching a headless one -- for sites a login-form-fill heuristic or fresh account can't get through (2FA, CAPTCHA, OAuth-only sign-in like Gmail). The crawl reuses the browser's existing logged-in tab/context and never calls browser.close() on it, only the extra tab it opens itself, if any. The host must be listed in the operator-configured CDP_ALLOWED_HOSTS env var, or the request is rejected -- this deliberately isn't left open to arbitrary hosts, since it's an SSRF-relevant surface."
                   }
                 }
               }
@@ -146,7 +170,7 @@
               }
             }
           },
-          "400": { "description": "targetUrl is required" },
+          "400": { "description": "targetUrl is required, or connectCdpUrl's host is not in CDP_ALLOWED_HOSTS" },
           "500": { "description": "Server error" }
         }
       }
@@ -182,7 +206,7 @@
       "post": {
         "tags": ["Crawl"],
         "summary": "Submit login credentials for a paused crawl",
-        "description": "When a crawl hits a login wall on its start page, the job pauses with status AWAITING_CREDENTIALS and login_url set. Submit credentials here to resume it -- the worker logs in with Playwright and continues the crawl authenticated. Credentials are held only transiently: the worker deletes them from the database as soon as it reads them, whether or not the login attempt succeeds.",
+        "description": "When a crawl hits a login wall on its start page, the job pauses with status AWAITING_CREDENTIALS and login_url set. Submit credentials here to resume it -- the worker logs in with Playwright and continues the crawl authenticated. Credentials are held only transiently: the worker deletes them from the database as soon as it reads them, whether or not the login attempt succeeds. Working credentials (submitted, or freshly auto-registered) are saved for this project and reused automatically on later crawls.",
         "parameters": [
           {
             "name": "id",
@@ -201,7 +225,11 @@
                 "required": ["username", "password"],
                 "properties": {
                   "username": { "type": "string", "example": "demo@example.com" },
-                  "password": { "type": "string", "format": "password" }
+                  "password": { "type": "string", "format": "password" },
+                  "autoRegister": {
+                    "type": "boolean",
+                    "description": "Optional. If logging in with these credentials fails, fall back to creating a new account with them instead of pausing again."
+                  }
                 }
               }
             }
@@ -210,6 +238,43 @@
         "responses": {
           "200": { "description": "Credentials accepted; job set back to PENDING for the worker to retry" },
           "400": { "description": "username and password are required" },
+          "404": { "description": "Crawl job not found" },
+          "409": { "description": "Job is not currently awaiting credentials" },
+          "500": { "description": "Server error" }
+        }
+      }
+    },
+    "/api/crawl/{id}/session": {
+      "post": {
+        "tags": ["Crawl"],
+        "summary": "Submit an authenticated session for a paused crawl",
+        "description": "Alternative to /api/crawl/{id}/credentials for a job paused at AWAITING_CREDENTIALS: submit a Playwright storageState (cookies + localStorage) captured from an already-authenticated browser session instead of a username/password. The worker resumes the crawl using that session directly, without running the heuristic login form-fill. Stored only transiently -- the worker deletes it from the database as soon as it reads it.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" },
+            "description": "Crawl job ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["storageState"],
+                "properties": {
+                  "storageState": { "$ref": "#/components/schemas/StorageState" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Session accepted; job set back to PENDING for the worker to retry" },
+          "400": { "description": "storageState is required" },
           "404": { "description": "Crawl job not found" },
           "409": { "description": "Job is not currently awaiting credentials" },
           "500": { "description": "Server error" }
@@ -238,6 +303,53 @@
               }
             }
           },
+          "500": { "description": "Server error" }
+        }
+      }
+    },
+    "/api/workflows/{workflowId}/narration-preview": {
+      "post": {
+        "tags": ["Narration"],
+        "summary": "Preview LLM-tailored narration for a workflow, alongside today's deterministic narration",
+        "description": "Read-only comparison endpoint: gathers the workflow's crawled knowledge, generates deterministic narration (same logic used for real recordings), and asks a local Ollama model to rewrite it for the given job role/target audience/functionality focus, grounded in the same literal actions. Does not record video and does not persist to workflow_scripts. If the LLM call fails, llmAvailable is false and llmNarration is null per step -- deterministicNarration is always present.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "workflowId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "jobRole": { "type": "string", "maxLength": 200, "example": "Sales Manager" },
+                  "targetAudience": { "type": "string", "maxLength": 500, "example": "Non-technical business buyer evaluating the product" },
+                  "functionalityFocus": { "type": "string", "maxLength": 500, "example": "How the CRM surfaces at-risk deals" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Narration comparison",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NarrationPreviewResponse" }
+              }
+            }
+          },
+          "400": { "description": "Invalid request body" },
+          "401": { "description": "Missing or invalid bearer token" },
+          "404": { "description": "Workflow not found, or it has no workflow_steps yet" },
+          "429": { "description": "Rate limited (shares the crawlHeavy limiter with POST /run)" },
           "500": { "description": "Server error" }
         }
       }
@@ -272,6 +384,14 @@
   },
   "components": {
     "schemas": {
+      "StorageState": {
+        "type": "object",
+        "description": "Playwright's BrowserContext.storageState() output -- cookies plus per-origin localStorage from an already-authenticated session. Passed through as-is to Playwright's newContext({ storageState }); not otherwise interpreted.",
+        "properties": {
+          "cookies": { "type": "array", "items": { "type": "object" } },
+          "origins": { "type": "array", "items": { "type": "object" } }
+        }
+      },
       "CrawlJob": {
         "type": "object",
         "properties": {
@@ -285,7 +405,16 @@
           "login_url": {
             "type": "string",
             "nullable": true,
-            "description": "Set when status is AWAITING_CREDENTIALS: the page that needs login. POST credentials to /api/crawl/{id}/credentials to resume."
+            "description": "Set when status is AWAITING_CREDENTIALS: the page that needs login. POST credentials to /api/crawl/{id}/credentials, or an existing storageState to /api/crawl/{id}/session, to resume."
+          },
+          "auto_register": {
+            "type": "boolean",
+            "description": "If true, a login wall that the submitted credentials can't pass falls back to auto-registering a new account with them."
+          },
+          "connect_cdp_url": {
+            "type": "string",
+            "nullable": true,
+            "description": "If set, this crawl attaches to an already-running browser over CDP instead of launching a headless one."
           },
           "started_at": { "type": "string", "format": "date-time", "nullable": true },
           "completed_at": { "type": "string", "format": "date-time", "nullable": true },
@@ -339,6 +468,41 @@
           },
           "created_at": { "type": "string", "format": "date-time" }
         }
+      },
+      "NarrationPreviewResponse": {
+        "type": "object",
+        "properties": {
+          "workflowId": { "type": "string", "format": "uuid" },
+          "context": {
+            "type": "object",
+            "properties": {
+              "jobRole": { "type": "string", "nullable": true },
+              "targetAudience": { "type": "string", "nullable": true },
+              "functionalityFocus": { "type": "string", "nullable": true }
+            }
+          },
+          "llmAvailable": { "type": "boolean", "description": "False if the Ollama call failed or returned nothing usable -- llmNarration will be null on every step" },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stepNumber": { "type": "integer" },
+                "skipped": { "type": "boolean" },
+                "deterministicNarration": { "type": "string" },
+                "llmNarration": { "type": "string", "nullable": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Access token from POST /api/auth/login or /api/auth/signup"
       }
     }
   }

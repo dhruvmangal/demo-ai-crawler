@@ -9,6 +9,8 @@ import { EmailVerificationToken } from './email-verification-token.model';
 import { PasswordResetToken } from './password-reset-token.model';
 import { CrawlJob } from './crawl-job.model';
 import { CrawlCredential } from './crawl-credential.model';
+import { CrawlSession } from './crawl-session.model';
+import { ProjectCredential } from './project-credential.model';
 import { Workflow } from './workflow.model';
 import { WorkflowRun } from './workflow-run.model';
 import { WorkflowScript } from './workflow-script.model';
@@ -39,6 +41,9 @@ Permission.belongsToMany(Admin, { through: AdminPermission, foreignKey: 'permiss
 CrawlJob.hasMany(CrawlCredential, { foreignKey: 'crawlJobId', as: 'credentials' });
 CrawlCredential.belongsTo(CrawlJob, { foreignKey: 'crawlJobId', as: 'crawlJob' });
 
+CrawlJob.hasMany(CrawlSession, { foreignKey: 'crawlJobId', as: 'sessions' });
+CrawlSession.belongsTo(CrawlJob, { foreignKey: 'crawlJobId', as: 'crawlJob' });
+
 Workflow.hasOne(WorkflowScript, { foreignKey: 'workflowId', as: 'script' });
 WorkflowScript.belongsTo(Workflow, { foreignKey: 'workflowId', as: 'workflow' });
 
@@ -63,6 +68,8 @@ export {
   PasswordResetToken,
   CrawlJob,
   CrawlCredential,
+  CrawlSession,
+  ProjectCredential,
   Workflow,
   WorkflowRun,
   WorkflowScript,

@@ -1,0 +1,21 @@
+{
+  "name": "crawler-engine",
+  "version": "1.0.0",
+  "description": "Standalone crawl-time discovery service: drives a real browser to discover a site's pages/UI, decomposed into agent-like modules. Extracted out of the main crawler app so it can be deployed/scaled independently -- see crawl-worker.ts for the HTTP client that replaced its old in-process PlaywrightCrawler import.",
+  "main": "dist/api/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/api/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ipaddr.js": "^2.5.0",
+    "playwright": "1.62.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.9",
+    "typescript": "^5.5.2"
+  }
+}

@@ -50,5 +50,18 @@ export const env = {
 
   // Must stay false in production -- disables the SSRF private-IP check for local/dev
   // targets like the built-in mock-crm-server. See src/security/ssrf-guard.ts.
-  allowPrivateCrawlTargets: process.env.ALLOW_PRIVATE_CRAWL_TARGETS === 'true'
+  allowPrivateCrawlTargets: process.env.ALLOW_PRIVATE_CRAWL_TARGETS === 'true',
+
+  // Hostnames (or IPs) the crawl-worker is allowed to attach to over CDP (Playwright's
+  // chromium.connectOverCDP) when a crawl requests connectCdpUrl, e.g. an operator's own
+  // machine running `chrome --remote-debugging-port=9222` where they're already logged
+  // into a site by hand. Deliberately an operator-set allowlist, not left open to whatever
+  // an API caller passes in the request body -- connectCdpUrl necessarily points at a
+  // local/private address (the opposite of what assertSafeUrl allows for crawl targets),
+  // so without this it would be a ready-made SSRF pivot into the docker network. Empty by
+  // default, i.e. the feature is off until an operator opts a specific host in.
+  cdpAllowedHosts: (process.env.CDP_ALLOWED_HOSTS || '')
+    .split(',')
+    .map(h => h.trim().toLowerCase())
+    .filter(Boolean)
 };

@@ -145,10 +145,10 @@ export class KnowledgeBuilder {
       for (const el of rawPage.elements) {
         const elId = uuidv4();
         const insertElRes = await query(
-          `INSERT INTO ui_elements (id, page_id, type, label, selector, role, confidence)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `INSERT INTO ui_elements (id, page_id, type, label, selector, role, confidence, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id`,
-          [elId, dbPageId, el.type, el.label, el.selector, el.role || null, el.confidence]
+          [elId, dbPageId, el.type, el.label, el.selector, el.role || null, el.confidence, el.metadata ? JSON.stringify(el.metadata) : null]
         );
         const elementRecord: UiElement = {
           ...el,
@@ -352,7 +352,8 @@ export class KnowledgeBuilder {
             label: e.label,
             selector: e.selector,
             aiDescription: e.aiDescription,
-            confidence: e.confidence
+            confidence: e.confidence,
+            discoveredVia: e.metadata?.discoveredVia || null
           }))
         });
       } catch (err: any) {
