@@ -9,6 +9,8 @@ export class CrawlJob extends Model<InferAttributes<CrawlJob>, InferCreationAttr
   declare targetUrl: string;
   declare status: CrawlJobStatus;
   declare loginUrl: string | null;
+  declare autoRegister: CreationOptional<boolean>;
+  declare connectCdpUrl: string | null;
   declare startedAt: Date | null;
   declare completedAt: Date | null;
   declare errorMessage: string | null;
@@ -22,6 +24,8 @@ CrawlJob.init(
     targetUrl: { type: DataTypes.TEXT, allowNull: false, field: 'target_url' },
     status: { type: DataTypes.STRING(50), allowNull: false },
     loginUrl: { type: DataTypes.TEXT, allowNull: true, field: 'login_url' },
+    autoRegister: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false, field: 'auto_register' },
+    connectCdpUrl: { type: DataTypes.TEXT, allowNull: true, field: 'connect_cdp_url' },
     startedAt: { type: DataTypes.DATE, allowNull: true, field: 'started_at' },
     completedAt: { type: DataTypes.DATE, allowNull: true, field: 'completed_at' },
     errorMessage: { type: DataTypes.TEXT, allowNull: true, field: 'error_message' },

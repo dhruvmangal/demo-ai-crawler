@@ -15,6 +15,18 @@ CREATE TABLE IF NOT EXISTS crawl_jobs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- If a crawl hits a login wall with no working credentials, fall back to heuristically
+-- filling and submitting a registration/signup form with the same submitted credentials
+-- (see PlaywrightCrawler.attemptSignup) instead of just pausing for AWAITING_CREDENTIALS.
+ALTER TABLE crawl_jobs ADD COLUMN IF NOT EXISTS auto_register BOOLEAN NOT NULL DEFAULT false;
+
+-- When set, the crawl attaches to an already-running, already-authenticated browser over
+-- CDP (Playwright's chromium.connectOverCDP) instead of launching its own headless one --
+-- for sites like Gmail that can't be logged into by a form-fill heuristic or a fresh
+-- account. Validated against the operator-configured CDP_ALLOWED_HOSTS allowlist at both
+-- submission time and worker pickup time; see src/security/ssrf-guard.ts.
+ALTER TABLE crawl_jobs ADD COLUMN IF NOT EXISTS connect_cdp_url TEXT;
+
 -- crawl_credentials: transient holding table for user-submitted login credentials.
 -- A row exists only between "user submits via POST /api/crawl/:id/credentials" and
 -- "worker picks up the job again" -- the worker deletes the row as soon as it reads it.
@@ -24,6 +36,32 @@ CREATE TABLE IF NOT EXISTS crawl_credentials (
     username TEXT NOT NULL,
     password TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- crawl_sessions: transient holding table for a user-submitted Playwright storageState
+-- (cookies + localStorage) captured from an already-authenticated browser session, letting
+-- a crawl reuse an existing login instead of crawling anonymously or re-entering credentials.
+-- A row exists only between "user submits via POST /api/crawl/:id/session" (or at job
+-- creation) and "worker picks up the job" -- the worker deletes the row as soon as it reads it.
+CREATE TABLE IF NOT EXISTS crawl_sessions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    crawl_job_id UUID NOT NULL REFERENCES crawl_jobs(id) ON DELETE CASCADE,
+    storage_state JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- project_credentials: a persistent (not one-time) vault of working login credentials per
+-- project. Populated by crawl-worker after any crawl succeeds while credentials were in use
+-- (whether user-submitted or freshly auto-registered), and consulted at the start of every
+-- later crawl for the same project so the caller doesn't have to resubmit them each time.
+-- Unlike crawl_credentials/crawl_sessions, project_id has no FK -- same soft-reference
+-- convention as pages.project_id etc., since there is no projects table.
+CREATE TABLE IF NOT EXISTS project_credentials (
+    project_id UUID PRIMARY KEY,
+    username TEXT NOT NULL,
+    password TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- pages
@@ -136,6 +174,12 @@ CREATE TABLE IF NOT EXISTS knowledge_summaries (
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS ai_summary TEXT;
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS ai_description TEXT;
 ALTER TABLE ui_elements ADD COLUMN IF NOT EXISTS ai_description TEXT;
+
+-- Structured, non-AI component inventory captured at crawl time by UiDiscovery: purpose
+-- heuristic, DOM structure/attributes, bounding-box/viewport position, and a curated
+-- computed-style subset -- see src/discovery/ui-discovery.ts and the UiElementMetadata
+-- shape in src/types/pages.ts.
+ALTER TABLE ui_elements ADD COLUMN IF NOT EXISTS metadata JSONB;
 
 -- workflow_runs: job queue for the Playwright recording agent. Given a workflow,
 -- workflow-agent-worker replays its steps in a fresh headless browser, records video,

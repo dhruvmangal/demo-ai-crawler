@@ -88,6 +88,39 @@ export async function assertSafeUrl(urlStr: string): Promise<void> {
   await assertPublicHostname(url.hostname);
 }
 
+const CDP_ALLOWED_SCHEMES = new Set(['http:', 'https:', 'ws:', 'wss:']);
+
+/**
+ * Validates a connectCdpUrl (Playwright's chromium.connectOverCDP target) against the
+ * operator-configured CDP_ALLOWED_HOSTS allowlist (env.cdpAllowedHosts). Deliberately NOT
+ * assertSafeUrl/assertPublicHostname: a CDP debug endpoint necessarily lives on a
+ * local/private address, the exact thing that check exists to reject for crawl targets.
+ * An allowlist is what stands in for it here -- without one, any authenticated API caller
+ * could point the crawl-worker at an arbitrary internal address.
+ */
+export function assertAllowedCdpUrl(urlStr: string): void {
+  let url: URL;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    throw new SsrfBlockedError(`Invalid connectCdpUrl: "${urlStr}"`);
+  }
+
+  if (!CDP_ALLOWED_SCHEMES.has(url.protocol)) {
+    throw new SsrfBlockedError(`Refusing connectCdpUrl "${urlStr}": only http/https/ws/wss URLs are allowed.`);
+  }
+
+  if (env.cdpAllowedHosts.length === 0) {
+    throw new SsrfBlockedError(
+      'connectCdpUrl is not enabled: set CDP_ALLOWED_HOSTS to the hostname(s) a crawl may attach to over CDP.'
+    );
+  }
+
+  if (!env.cdpAllowedHosts.includes(url.hostname.toLowerCase())) {
+    throw new SsrfBlockedError(`Refusing connectCdpUrl "${urlStr}": host "${url.hostname}" is not in CDP_ALLOWED_HOSTS.`);
+  }
+}
+
 /** Non-throwing check, for filtering candidate links rather than hard-failing a whole crawl. */
 export async function isSafeUrl(urlStr: string): Promise<boolean> {
   try {
