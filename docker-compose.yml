@@ -68,11 +68,22 @@ services:
       - NEO4J_PASSWORD=crawler_neo4j_password
       - RECORDINGS_DIR=/usr/src/app/recordings
       - CRAWL_TTL_HOURS=24
+      - OLLAMA_URL=http://llm:11434
+      - OLLAMA_MODEL=qwen2.5:3b-instruct
+      - OLLAMA_TIMEOUT_MS=180000
+      # src/test-crawler.ts (make test) runs inside this container and now crawls via
+      # crawler-engine over HTTP instead of importing PlaywrightCrawler in-process -- it
+      # needs both the docker-network hostname of the mock CRM it starts on :4000 (crawler
+      # -engine can't reach "localhost" inside crawler-app's container) and where to reach
+      # crawler-engine itself.
+      - MOCK_CRM_HOST=crawler_app
+      - CRAWLER_ENGINE_URL=http://crawler-engine:3010
     volumes:
       - recordings:/usr/src/app/recordings
     depends_on:
       - postgres
       - neo4j
+      - crawler-engine
 
   # Admin backoffice, split into its own container/port from crawler-app: admin-routes.ts
   # has no auth and exposes every crawl's data, so it should stay off whatever port/host
@@ -118,10 +129,32 @@ services:
       - AI_MAX_HTML_CHARS=1500
       - OLLAMA_TIMEOUT_MS=180000
       - ENRICH_CONCURRENCY=2
+      # crawl-worker no longer imports PlaywrightCrawler directly -- it POSTs to
+      # crawler-engine and awaits the response. See src/crawler/crawler-engine-client.ts.
+      - CRAWLER_ENGINE_URL=http://crawler-engine:3010
     depends_on:
       - postgres
       - neo4j
       - llm
+      - crawler-engine
+
+  # Crawl-time discovery service, pulled out of crawler-app/crawl-worker into its own
+  # deployable container (see crawler-engine/ -- own package.json, own Dockerfile, no
+  # dependency on the main app's DB/auth config). Drives a real Playwright browser to
+  # discover a site's pages/UI; crawl-worker talks to it over HTTP (POST /crawls) instead
+  # of running PlaywrightCrawler in-process. Stateless and long-lived per request -- see
+  # crawler-engine/src/api/server.ts for why there's no job-tracking/polling here.
+  crawler-engine:
+    build: ./crawler-engine
+    container_name: crawler_engine
+    ports:
+      - "3010:3010"
+    environment:
+      - PORT=3010
+      # Same SSRF/CDP-allowlist env vars ssrf-guard.ts reads today -- crawler-engine
+      # enforces this itself now, since it's the process actually driving the browser.
+      - ALLOW_PRIVATE_CRAWL_TARGETS=${ALLOW_PRIVATE_CRAWL_TARGETS:-false}
+      - CDP_ALLOWED_HOSTS=${CDP_ALLOWED_HOSTS:-}
 
   # Playwright recording agent: polls workflow_runs and dispatches each claimed run to
   # its own worker_threads Worker (recording-worker-thread.ts, up to RECORDING_CONCURRENCY
