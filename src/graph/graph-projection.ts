@@ -63,10 +63,16 @@ export class GraphProjection {
   /**
    * Upserts a single Component (UI element) node linked to its Page. Called as soon as
    * the element is discovered, and again once its AI-generated description resolves.
+   *
+   * discoveredVia* properties are flattened (Neo4j property values can't be nested objects)
+   * from el.metadata.discoveredVia -- see UiElementDiscoveryTrigger in types/pages.ts. Setting
+   * a property to null removes it rather than storing null, so elements that were visible on
+   * initial page load simply don't carry these properties at all.
    */
   public static async upsertComponent(projectId: string, pageId: string, el: UiElement): Promise<void> {
     const driver = getNeo4jDriver();
     const session = driver.session();
+    const via = el.metadata?.discoveredVia;
     try {
       await session.run(
         `MATCH (p:Page {id: $pageId})
@@ -75,7 +81,10 @@ export class GraphProjection {
              c.type = $type,
              c.label = $label,
              c.selector = $selector,
-             c.aiDescription = $aiDescription
+             c.aiDescription = $aiDescription,
+             c.discoveredViaType = $discoveredViaType,
+             c.discoveredViaTriggerLabel = $discoveredViaTriggerLabel,
+             c.discoveredViaTriggerSelector = $discoveredViaTriggerSelector
          MERGE (p)-[:HAS_COMPONENT]->(c)`,
         {
           id: el.id,
@@ -84,7 +93,10 @@ export class GraphProjection {
           type: el.type,
           label: el.label,
           selector: el.selector,
-          aiDescription: el.aiDescription || ''
+          aiDescription: el.aiDescription || '',
+          discoveredViaType: via?.type ?? null,
+          discoveredViaTriggerLabel: via?.triggerLabel ?? null,
+          discoveredViaTriggerSelector: via?.triggerSelector ?? null
         }
       );
     } finally {

@@ -33,7 +33,9 @@ const state = {
   graphProjectId: null,
   hiddenLabels: new Set(DEFAULT_HIDDEN_LABELS),
   signatures: { graph: null, recordings: null },
-  simulation: null
+  simulation: null,
+  activeView: 'requests',
+  expandedPages: new Set()
 };
 
 const els = {
@@ -42,7 +44,11 @@ const els = {
   detail: document.getElementById('detail'),
   filter: document.getElementById('filter'),
   autoRefresh: document.getElementById('auto-refresh'),
-  tpl: document.getElementById('tpl-detail')
+  tpl: document.getElementById('tpl-detail'),
+  mainNav: document.getElementById('main-nav'),
+  viewRequests: document.getElementById('view-requests'),
+  viewUsers: document.getElementById('view-users'),
+  viewAdmins: document.getElementById('view-admins')
 };
 
 /* ------------------------------------------------------------------ helpers */
@@ -273,6 +279,60 @@ function panelFor(name) {
   return els.detail.querySelector(`.tab-panel[data-panel="${name}"]`);
 }
 
+/* -------------------------------------------------------- credentials form */
+
+function credentialsForm(job) {
+  const form = el('form', 'credentials-form');
+
+  const username = document.createElement('input');
+  username.type = 'text';
+  username.placeholder = 'Username or email';
+  username.autocomplete = 'username';
+  username.required = true;
+
+  const password = document.createElement('input');
+  password.type = 'password';
+  password.placeholder = 'Password';
+  password.autocomplete = 'current-password';
+  password.required = true;
+
+  const autoRegisterLabel = el('label', 'checkbox-label');
+  const autoRegister = document.createElement('input');
+  autoRegister.type = 'checkbox';
+  autoRegisterLabel.append(autoRegister, document.createTextNode(' create an account with these credentials if login fails'));
+
+  const submit = el('button', 'btn', 'Submit credentials');
+  submit.type = 'submit';
+
+  const errorSlot = el('div', 'form-error');
+
+  form.append(username, password, autoRegisterLabel, submit, errorSlot);
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorSlot.replaceChildren();
+    submit.disabled = true;
+    submit.textContent = 'Submitting…';
+    try {
+      const res = await AdminAuth.authorizedFetch(`/api/admin/requests/${job.id}/credentials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username.value, password: password.value, autoRegister: autoRegister.checked })
+      });
+      if (!res.ok) {
+        throw new Error(await AdminAuth.parseErrorMessage(res));
+      }
+      await loadDetail();
+    } catch (err) {
+      submit.disabled = false;
+      submit.textContent = 'Submit credentials';
+      errorSlot.appendChild(el('div', 'error-box', `Could not submit credentials: ${err.message}`));
+    }
+  });
+
+  return form;
+}
+
 /* ----------------------------------------------------------------- overview */
 
 function renderOverview(panel, detail) {
@@ -284,9 +344,23 @@ function renderOverview(panel, detail) {
   }
   if (job.status === 'AWAITING_CREDENTIALS') {
     panel.appendChild(
-      card('Awaiting credentials', el('p', null, `The crawler paused at ${job.login_url || 'a login page'} and is waiting for POST /api/crawl/${job.id}/credentials.`))
+      card(
+        'Awaiting credentials',
+        el('p', null, `The crawler paused at ${job.login_url || 'a login page'}. Submit a login below to resume it.`),
+        credentialsForm(job)
+      )
     );
   }
+
+  const cred = detail.savedCredential;
+  const credStatus = el('div', 'credential-status');
+  if (cred) {
+    credStatus.appendChild(chip('SAVED'));
+    credStatus.appendChild(el('span', null, `username "${cred.username}" — updated ${fmtTime(cred.updated_at)}`));
+  } else {
+    credStatus.appendChild(el('span', 'empty-state', 'No working login saved for this project yet.'));
+  }
+  panel.appendChild(card('Saved login (this project)', credStatus));
 
   const grid = el('div', 'grid-2');
 
@@ -370,6 +444,22 @@ function renderOverview(panel, detail) {
 
 /* -------------------------------------------------------------------- pages */
 
+function elementsTable(p) {
+  if (!p.elements || p.elements.length === 0) {
+    return el('p', 'empty-state', 'No UI elements captured for this page.');
+  }
+  return table(
+    ['Type', 'Label', 'Selector', 'AI description', 'Gated behind'],
+    p.elements.map((elm) => [
+      elm.type,
+      elm.label,
+      elm.selector,
+      elm.ai_description,
+      elm.discovered_via ? el('span', 'gated-badge', `${elm.discovered_via.type}: ${elm.discovered_via.triggerLabel}`) : null
+    ])
+  );
+}
+
 function renderPages(panel, detail) {
   panel.replaceChildren();
   if (detail.pages.length === 0) {
@@ -377,21 +467,43 @@ function renderPages(panel, detail) {
     return;
   }
 
-  panel.appendChild(
-    card(
-      `Discovered pages (${detail.pages.length})`,
-      table(
-        ['Title', 'URL', 'Via', 'Components', 'AI description'],
-        detail.pages.map((p) => {
-          const link = el('a', null, p.url);
-          link.href = p.url;
-          link.target = '_blank';
-          link.rel = 'noreferrer noopener';
-          return [p.title, link, p.via_label, p.element_count, p.ai_description || p.ai_summary];
-        })
-      )
-    )
-  );
+  const wrap = card(`Discovered pages (${detail.pages.length}) — click a page to inspect its elements`);
+
+  for (const p of detail.pages) {
+    const block = el('div', 'page-block');
+    const isOpen = state.expandedPages.has(p.id);
+
+    const row = el('button', 'page-row');
+    row.type = 'button';
+    row.appendChild(el('span', 'page-row-caret', isOpen ? '▾' : '▸'));
+    row.appendChild(el('span', 'page-row-title', `${p.title || '(untitled)'} — ${p.url}`));
+    row.appendChild(el('span', 'page-row-count', `${p.element_count} element${p.element_count === 1 ? '' : 's'}`));
+    block.appendChild(row);
+
+    const body = el('div', 'page-elements');
+    body.style.display = isOpen ? '' : 'none';
+    if (isOpen) {
+      body.appendChild(elementsTable(p));
+      body.dataset.rendered = '1';
+    }
+    block.appendChild(body);
+
+    row.addEventListener('click', () => {
+      const nowOpen = !state.expandedPages.has(p.id);
+      if (nowOpen) state.expandedPages.add(p.id);
+      else state.expandedPages.delete(p.id);
+      body.style.display = nowOpen ? '' : 'none';
+      row.querySelector('.page-row-caret').textContent = nowOpen ? '▾' : '▸';
+      if (nowOpen && !body.dataset.rendered) {
+        body.appendChild(elementsTable(p));
+        body.dataset.rendered = '1';
+      }
+    });
+
+    wrap.appendChild(block);
+  }
+
+  panel.appendChild(wrap);
 }
 
 /* ------------------------------------------------------------ video player */
@@ -1220,6 +1332,284 @@ function attachDragging(svg, viewport, nodeEls) {
   return transform;
 }
 
+/* ------------------------------------------------------------------- users */
+
+async function loadUsersView() {
+  els.viewUsers.replaceChildren(el('p', 'empty-state', 'Loading…'));
+  try {
+    const [stats, usersData, logsData] = await Promise.all([
+      getJSON('/api/admin/stats'),
+      getJSON('/api/admin/users?limit=100'),
+      getJSON('/api/admin/logs?limit=100')
+    ]);
+    renderUsersView(stats, usersData, logsData);
+  } catch (err) {
+    els.viewUsers.replaceChildren(el('div', 'error-box', `Failed to load users: ${err.message}`));
+  }
+}
+
+function renderUsersView(stats, usersData, logsData) {
+  els.viewUsers.replaceChildren();
+  els.viewUsers.appendChild(el('h2', null, 'Registered users'));
+
+  const totalsGrid = el('div', 'grid-2');
+  totalsGrid.appendChild(
+    card(
+      'Totals',
+      definitionList([
+        ['Total users', stats.totalUsers],
+        ['Total signups', stats.totalSignups],
+        ['Total logins', stats.totalLogins]
+      ])
+    )
+  );
+  const providerPairs = Object.entries(stats.providerBreakdown || {});
+  totalsGrid.appendChild(
+    card('By provider', providerPairs.length ? definitionList(providerPairs) : el('p', 'empty-state', 'No signups yet.'))
+  );
+  els.viewUsers.appendChild(totalsGrid);
+
+  els.viewUsers.appendChild(
+    card(
+      `Users (${usersData.total})`,
+      usersData.users.length
+        ? table(
+            ['Email', 'Name', 'Provider', 'Type', 'Verified', 'Active', 'Created', 'Last login'],
+            usersData.users.map((u) => [
+              u.email,
+              u.name,
+              u.provider,
+              u.userType,
+              u.emailVerifiedAt ? 'yes' : 'no',
+              u.isActive ? 'yes' : 'no',
+              fmtTime(u.createdAt),
+              fmtTime(u.lastLoginAt)
+            ])
+          )
+        : el('p', 'empty-state', 'No registered users yet.')
+    )
+  );
+
+  els.viewUsers.appendChild(
+    card(
+      'Recent auth activity',
+      logsData.logs.length
+        ? table(
+            ['Event', 'Provider', 'User', 'IP', 'When'],
+            logsData.logs.map((log) => [
+              log.eventType,
+              log.provider,
+              log.user ? `${log.user.name} <${log.user.email}>` : log.userId,
+              log.ipAddress,
+              fmtTime(log.createdAt)
+            ])
+          )
+        : el('p', 'empty-state', 'No auth activity yet.')
+    )
+  );
+}
+
+/* ------------------------------------------------------------------ admins */
+
+function createAdminForm() {
+  const form = el('form', 'create-admin-form');
+
+  function field(labelText, type) {
+    const wrap = el('div', 'field');
+    wrap.appendChild(el('label', null, labelText));
+    const input = document.createElement('input');
+    input.type = type;
+    input.required = true;
+    wrap.appendChild(input);
+    return { wrap, input };
+  }
+
+  const nameField = field('Name', 'text');
+  const emailField = field('Email', 'email');
+  const passwordField = field('Password', 'password');
+  passwordField.input.minLength = 8;
+  passwordField.input.autocomplete = 'new-password';
+
+  const submit = el('button', 'btn', 'Create admin');
+  submit.type = 'submit';
+
+  const errorSlot = el('div', 'form-error');
+
+  form.append(nameField.wrap, emailField.wrap, passwordField.wrap, submit, errorSlot);
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorSlot.replaceChildren();
+    submit.disabled = true;
+    submit.textContent = 'Creating…';
+    try {
+      const res = await AdminAuth.authorizedFetch('/api/admin/admins', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: nameField.input.value, email: emailField.input.value, password: passwordField.input.value })
+      });
+      if (!res.ok) throw new Error(await AdminAuth.parseErrorMessage(res));
+      await loadAdminsView();
+    } catch (err) {
+      submit.disabled = false;
+      submit.textContent = 'Create admin';
+      errorSlot.appendChild(el('div', 'error-box', err.message));
+    }
+  });
+
+  return form;
+}
+
+function adminRow(admin, allPermissions) {
+  const grantedKeys = new Set((admin.permissions || []).map((p) => p.key));
+  const self = AdminAuth.currentAdmin();
+  const isSelf = Boolean(self && self.id === admin.id);
+
+  const nameCell = el('div');
+  nameCell.appendChild(el('div', null, admin.name));
+  nameCell.appendChild(el('div', 'request-sub', admin.email));
+
+  const statusChips = el('div');
+  if (admin.isSuperadmin) statusChips.appendChild(el('span', 'chip status-superadmin', 'SUPERADMIN'));
+  statusChips.appendChild(el('span', `chip ${admin.isActive ? 'status-ACTIVE' : 'status-inactive'}`, admin.isActive ? 'ACTIVE' : 'INACTIVE'));
+
+  const toggleBtn = el('button', 'btn', admin.isActive ? 'Deactivate' : 'Activate');
+  toggleBtn.type = 'button';
+  if (isSelf && admin.isActive) {
+    toggleBtn.disabled = true;
+    toggleBtn.title = 'You cannot deactivate your own account.';
+  }
+  toggleBtn.addEventListener('click', async () => {
+    toggleBtn.disabled = true;
+    try {
+      const res = await AdminAuth.authorizedFetch(`/api/admin/admins/${admin.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: !admin.isActive })
+      });
+      if (!res.ok) throw new Error(await AdminAuth.parseErrorMessage(res));
+      await loadAdminsView();
+    } catch (err) {
+      toggleBtn.disabled = false;
+      alert(`Could not update admin: ${err.message}`);
+    }
+  });
+
+  const permWrap = el('div');
+  const permList = el('div', 'permission-list');
+  for (const perm of admin.permissions || []) {
+    const pill = el('span', 'permission-pill granted');
+    pill.appendChild(document.createTextNode(perm.key));
+    const revokeBtn = el('button', null, '✕');
+    revokeBtn.type = 'button';
+    revokeBtn.title = `Revoke ${perm.key}`;
+    revokeBtn.addEventListener('click', async () => {
+      try {
+        const res = await AdminAuth.authorizedFetch(
+          `/api/admin/admins/${admin.id}/permissions/${encodeURIComponent(perm.key)}`,
+          { method: 'DELETE' }
+        );
+        if (!res.ok) throw new Error(await AdminAuth.parseErrorMessage(res));
+        await loadAdminsView();
+      } catch (err) {
+        alert(`Could not revoke permission: ${err.message}`);
+      }
+    });
+    pill.appendChild(revokeBtn);
+    permList.appendChild(pill);
+  }
+  if (admin.isSuperadmin) {
+    permList.appendChild(el('span', 'empty-state', 'all permissions'));
+  } else if ((admin.permissions || []).length === 0) {
+    permList.appendChild(el('span', 'empty-state', 'none granted'));
+  }
+  permWrap.appendChild(permList);
+
+  if (!admin.isSuperadmin) {
+    const ungranted = allPermissions.filter((p) => !grantedKeys.has(p.key));
+    if (ungranted.length > 0) {
+      const addRow = el('div', 'permission-add');
+      const select = document.createElement('select');
+      ungranted.forEach((p) => {
+        const opt = document.createElement('option');
+        opt.value = p.key;
+        opt.textContent = p.key;
+        select.appendChild(opt);
+      });
+      const addBtn = el('button', 'btn', 'Grant');
+      addBtn.type = 'button';
+      addBtn.addEventListener('click', async () => {
+        addBtn.disabled = true;
+        try {
+          const res = await AdminAuth.authorizedFetch(`/api/admin/admins/${admin.id}/permissions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: select.value })
+          });
+          if (!res.ok) throw new Error(await AdminAuth.parseErrorMessage(res));
+          await loadAdminsView();
+        } catch (err) {
+          addBtn.disabled = false;
+          alert(`Could not grant permission: ${err.message}`);
+        }
+      });
+      addRow.append(select, addBtn);
+      permWrap.appendChild(addRow);
+    }
+  }
+
+  return [nameCell, statusChips, permWrap, toggleBtn, fmtTime(admin.lastLoginAt), fmtTime(admin.createdAt)];
+}
+
+async function loadAdminsView() {
+  els.viewAdmins.replaceChildren(el('p', 'empty-state', 'Loading…'));
+  try {
+    const [adminsData, permissionsData] = await Promise.all([getJSON('/api/admin/admins'), getJSON('/api/admin/permissions')]);
+    renderAdminsView(adminsData.admins, permissionsData.permissions);
+  } catch (err) {
+    els.viewAdmins.replaceChildren(el('div', 'error-box', `Failed to load admins: ${err.message}`));
+  }
+}
+
+function renderAdminsView(admins, permissions) {
+  els.viewAdmins.replaceChildren();
+  els.viewAdmins.appendChild(el('h2', null, 'Admin accounts'));
+  els.viewAdmins.appendChild(createAdminForm());
+
+  els.viewAdmins.appendChild(
+    card(
+      `Admins (${admins.length})`,
+      admins.length
+        ? table(
+            ['Admin', 'Status', 'Permissions', '', 'Last login', 'Created'],
+            admins.map((admin) => adminRow(admin, permissions))
+          )
+        : el('p', 'empty-state', 'No admins found.')
+    )
+  );
+}
+
+/* --------------------------------------------------------------- nav views */
+
+const VIEW_LOADERS = { users: loadUsersView, admins: loadAdminsView };
+
+function switchView(view) {
+  if (state.activeView === view) return;
+  state.activeView = view;
+
+  for (const btn of els.mainNav.querySelectorAll('.main-nav-item')) {
+    if (btn.dataset.view === view) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
+  }
+
+  els.viewRequests.hidden = view !== 'requests';
+  els.viewUsers.hidden = view !== 'users';
+  els.viewAdmins.hidden = view !== 'admins';
+
+  const loader = VIEW_LOADERS[view];
+  if (loader) loader();
+}
+
 /* ------------------------------------------------------------------ polling */
 
 async function refresh() {
@@ -1236,12 +1626,18 @@ async function refresh() {
   if (!state.selectedId || !state.detail) return;
 
   try {
+    const previousStatus = state.detail.job.status;
     const detail = await getJSON(`/api/admin/requests/${state.selectedId}`);
     state.detail = detail;
 
     // Re-render only what changed: rebuilding the recordings panel would restart any
-    // video the user is watching, and rebuilding the graph would reset its layout.
-    renderOverview(panelFor('overview'), detail);
+    // video the user is watching, rebuilding the graph would reset its layout, and
+    // rebuilding overview while still awaiting credentials would wipe out a form the
+    // admin is mid-way through filling in.
+    const stillAwaitingCredentials = previousStatus === 'AWAITING_CREDENTIALS' && detail.job.status === 'AWAITING_CREDENTIALS';
+    if (!stillAwaitingCredentials) {
+      renderOverview(panelFor('overview'), detail);
+    }
     renderPages(panelFor('pages'), detail);
 
     const recSig = recordingsSignature(detail);
@@ -1273,6 +1669,11 @@ if (els.filter) {
   els.filter.addEventListener('input', () => {
     state.filter = els.filter.value;
     renderList();
+  });
+
+  els.mainNav.addEventListener('click', (event) => {
+    const btn = event.target.closest('.main-nav-item');
+    if (btn) switchView(btn.dataset.view);
   });
 
   setInterval(() => {
