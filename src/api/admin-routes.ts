@@ -1,9 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../config/database';
+import { sequelize } from '../config/sequelize';
+import { CrawlJob, CrawlCredential } from '../db/models';
 import { authorizeAdmin } from '../middleware/authorize-admin';
 import { asyncHandler } from '../middleware/async-handler';
+import { validate } from '../middleware/validate';
+import { credentialsBodySchema } from '../validation/schemas/crawl.schemas';
 import { ok } from '../utils/response-envelope';
-import { BadRequestError, NotFoundError } from '../errors/api-error';
+import { BadRequestError, ConflictError, NotFoundError } from '../errors/api-error';
 
 /**
  * Read-only endpoints backing the admin backoffice at /admin.
@@ -91,11 +95,27 @@ adminRouter.get(
     const job = jobRes.rows[0];
     const projectId = job.project_id;
 
-    const [pagesRes, entitiesRes, relationshipsRes, workflowsRes, runsRes, summaryRes] = await Promise.all([
+    const [pagesRes, entitiesRes, relationshipsRes, workflowsRes, runsRes, summaryRes, credentialRes] = await Promise.all([
       query(
         `SELECT p.id, p.url, p.title, p.breadcrumb, p.via_label, p.parent_page_id,
                 p.ai_summary, p.ai_description, p.created_at,
-                (SELECT COUNT(*)::int FROM ui_elements u WHERE u.page_id = p.id) AS element_count
+                (SELECT COUNT(*)::int FROM ui_elements u WHERE u.page_id = p.id) AS element_count,
+                COALESCE(
+                  (SELECT json_agg(
+                     json_build_object(
+                       'id', u.id,
+                       'type', u.type,
+                       'label', u.label,
+                       'selector', u.selector,
+                       'role', u.role,
+                       'confidence', u.confidence,
+                       'ai_description', u.ai_description,
+                       'discovered_via', u.metadata -> 'discoveredVia'
+                     ) ORDER BY u.type ASC, u.label ASC
+                   )
+                   FROM ui_elements u WHERE u.page_id = p.id),
+                  '[]'
+                ) AS elements
          FROM pages p
          WHERE p.project_id = $1
          ORDER BY p.created_at ASC
@@ -162,7 +182,8 @@ adminRouter.get(
          ORDER BY r.created_at DESC`,
         [projectId]
       ),
-      query(`SELECT domain, summary_data, created_at FROM knowledge_summaries WHERE project_id = $1`, [projectId])
+      query(`SELECT domain, summary_data, created_at FROM knowledge_summaries WHERE project_id = $1`, [projectId]),
+      query(`SELECT username, created_at, updated_at FROM project_credentials WHERE project_id = $1`, [projectId])
     ]);
 
     return ok(res, {
@@ -172,7 +193,51 @@ adminRouter.get(
       entities: entitiesRes.rows,
       relationships: relationshipsRes.rows,
       workflows: workflowsRes.rows,
-      runs: runsRes.rows
+      runs: runsRes.rows,
+      // Never exposes the password -- just enough for an operator to see a working login is
+      // already on file for this project before triggering a re-crawl.
+      savedCredential: credentialRes.rows[0] || null
     });
+  })
+);
+
+/**
+ * POST /api/admin/requests/:id/credentials
+ * Lets an operator unblock a job paused at AWAITING_CREDENTIALS from the backoffice
+ * itself, instead of having to script a call to the end-user-authenticated
+ * POST /api/crawl/:id/credentials (unreachable from here -- the admin backoffice runs on
+ * its own server/port with admin auth, not the end-user auth that route requires). Mirrors
+ * that handler's logic exactly; see its comment in routes.ts for the transaction rationale.
+ */
+adminRouter.post(
+  '/requests/:id/credentials',
+  authorizeAdmin('crawl.manage'),
+  validate({ body: credentialsBodySchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    if (!UUID_RE.test(id)) {
+      throw new BadRequestError('id must be a UUID');
+    }
+    const { username, password, autoRegister } = req.body as { username: string; password: string; autoRegister?: boolean };
+
+    const job = await CrawlJob.findByPk(id);
+    if (!job) {
+      throw new NotFoundError('Crawl request not found');
+    }
+    if (job.status !== 'AWAITING_CREDENTIALS') {
+      throw new ConflictError(`Job is not awaiting credentials (current status: ${job.status})`);
+    }
+
+    await sequelize.transaction(async t => {
+      await CrawlCredential.destroy({ where: { crawlJobId: id }, transaction: t });
+      await CrawlCredential.create({ crawlJobId: id, username, password }, { transaction: t });
+      const updates: { status: 'PENDING'; errorMessage: null; autoRegister?: boolean } = { status: 'PENDING', errorMessage: null };
+      if (autoRegister !== undefined) {
+        updates.autoRegister = autoRegister;
+      }
+      await job.update(updates, { transaction: t });
+    });
+
+    return ok(res, { message: 'Credentials submitted; crawl will resume shortly.' });
   })
 );

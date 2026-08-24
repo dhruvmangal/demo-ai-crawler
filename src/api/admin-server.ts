@@ -4,6 +4,7 @@ import cors from 'cors';
 import path from 'path';
 import { adminRouter } from './admin-routes';
 import { adminUsersRouter } from './admin-users-routes';
+import { adminAdminsRouter } from './admin-admins-routes';
 import { adminAuthRouter } from './admin-auth-routes';
 import { graphRouter } from './graph-routes';
 import { workflowRunRouter } from './workflow-run-routes';
@@ -57,6 +58,7 @@ app.use('/api/admin/auth', adminAuthRouter);
 app.use('/api/admin', adminTier, authenticateAdmin);
 app.use('/api/admin', adminRouter);
 app.use('/api/admin', adminUsersRouter);
+app.use('/api/admin', adminAdminsRouter);
 
 // graphRouter/workflowRunRouter are also mounted in routes.ts (the public API) with a
 // plain authenticate -- the admin-only guard is applied here, at this mount site, rather

@@ -26,7 +26,13 @@
       </div>
     </header>
 
-    <main class="layout">
+    <nav class="main-nav" id="main-nav">
+      <button type="button" class="main-nav-item" data-view="requests" aria-current="page">Requests</button>
+      <button type="button" class="main-nav-item" data-view="users">Users</button>
+      <button type="button" class="main-nav-item" data-view="admins">Admins</button>
+    </nav>
+
+    <main class="layout" id="view-requests">
       <aside class="sidebar">
         <div class="sidebar-controls">
           <input type="search" id="filter" placeholder="filter by URL, status, id…" autocomplete="off" />
@@ -38,6 +44,9 @@
         <p class="empty-state">Select a crawl request to inspect it.</p>
       </section>
     </main>
+
+    <section class="view-page" id="view-users" hidden></section>
+    <section class="view-page" id="view-admins" hidden></section>
 
     <template id="tpl-detail">
       <div class="detail-head">

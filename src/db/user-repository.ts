@@ -151,7 +151,8 @@ export class UserRepository {
     const { count, rows } = await User.findAndCountAll({
       limit,
       offset,
-      order: [['lastLoginAt', 'DESC']]
+      order: [['lastLoginAt', 'DESC']],
+      attributes: { exclude: ['passwordHash'] }
     });
     return { total: count, users: rows };
   }
