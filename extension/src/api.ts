@@ -12,6 +12,26 @@ export interface CrawlJob {
   started_at?: string | null;
   completed_at?: string | null;
   error_message?: string | null;
+  auto_register: boolean;
+  connect_cdp_url: string | null;
+}
+
+/**
+ * Playwright's BrowserContext.storageState() shape (cookies + localStorage), kept permissive
+ * since it's passed through to the backend/Playwright untouched -- see
+ * src/validation/schemas/crawl.schemas.ts's storageStateSchema for the authoritative shape.
+ */
+export interface StorageState {
+  cookies?: object[];
+  origins?: object[];
+}
+
+export interface StartCrawlOptions {
+  projectId?: string;
+  credentials?: { username: string; password: string };
+  autoRegister?: boolean;
+  storageState?: StorageState;
+  connectCdpUrl?: string;
 }
 
 export interface GraphNode {
@@ -95,11 +115,18 @@ async function authorizedFetch(url: string, options: RequestInit = {}): Promise<
   return res;
 }
 
-export async function startCrawl(targetUrl: string): Promise<CrawlJob> {
+export async function startCrawl(targetUrl: string, options: StartCrawlOptions = {}): Promise<CrawlJob> {
+  const body: Record<string, unknown> = { targetUrl };
+  if (options.projectId) body.projectId = options.projectId;
+  if (options.credentials) body.credentials = options.credentials;
+  if (options.autoRegister) body.autoRegister = options.autoRegister;
+  if (options.storageState) body.storageState = options.storageState;
+  if (options.connectCdpUrl) body.connectCdpUrl = options.connectCdpUrl;
+
   const res = await authorizedFetch(`${API_BASE}/crawl`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ targetUrl })
+    body: JSON.stringify(body)
   });
   const data = await asJson<{ job: CrawlJob }>(res);
   return data.job;
@@ -153,12 +180,25 @@ export function pollWorkflowRun(
 export async function submitCredentials(
   jobId: string,
   username: string,
-  password: string
+  password: string,
+  autoRegister?: boolean
 ): Promise<{ message: string }> {
+  const body: Record<string, unknown> = { username, password };
+  if (autoRegister) body.autoRegister = autoRegister;
   const res = await authorizedFetch(`${API_BASE}/crawl/${jobId}/credentials`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password })
+    body: JSON.stringify(body)
+  });
+  return asJson(res);
+}
+
+/** Resumes a job paused at AWAITING_CREDENTIALS using a pre-authenticated Playwright storageState. */
+export async function submitSession(jobId: string, storageState: StorageState): Promise<{ message: string }> {
+  const res = await authorizedFetch(`${API_BASE}/crawl/${jobId}/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ storageState })
   });
   return asJson(res);
 }
